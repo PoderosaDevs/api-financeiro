@@ -1,23 +1,24 @@
 import { Router } from 'express'
 import { vendaService } from '../services/venda.service'
 import { ensureAuthenticated } from '../middlewares/auth.middleware'
+import { Request, Response } from "express";
 
 export const vendaRoutes = Router()
 
 // Listagem Geral
-vendaRoutes.get('/', async (req, res) => {
+vendaRoutes.get('/', async (req: Request, res: Response) => {
   const vendas = await vendaService.getAll()
   return res.json(vendas)
 })
 
 // Busca Única
-vendaRoutes.get('/:id', async (req, res) => {
+vendaRoutes.get('/:id', async (req: Request, res: Response) => {
   const venda = await vendaService.getById(req.params.id)
   return venda ? res.json(venda) : res.status(404).json({ message: 'Venda não encontrada' })
 })
 
 // Cadastro Manual (Já com tratamento de NF duplicada)
-vendaRoutes.post('/', ensureAuthenticated, async (req, res) => {
+vendaRoutes.post('/', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     const venda = await vendaService.create(req.body)
     return res.status(201).json(venda)
@@ -28,7 +29,7 @@ vendaRoutes.post('/', ensureAuthenticated, async (req, res) => {
 })
 
 // IMPORTAÇÃO EM MASSA (Planilha)
-vendaRoutes.post('/import', ensureAuthenticated, async (req, res) => {
+vendaRoutes.post('/import', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     // Se o Front-end enviar o array direto no body, usamos req.body
     // Se enviar como { vendas: [] }, mantemos o const { vendas } = req.body
@@ -49,7 +50,7 @@ vendaRoutes.post('/import', ensureAuthenticated, async (req, res) => {
 })
 
 // Atualização
-vendaRoutes.put('/:id', ensureAuthenticated, async (req, res) => {
+vendaRoutes.put('/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     const updated = await vendaService.update(req.params.id, req.body)
     return res.json(updated)
@@ -59,7 +60,7 @@ vendaRoutes.put('/:id', ensureAuthenticated, async (req, res) => {
 })
 
 // Exclusão
-vendaRoutes.delete('/:id', ensureAuthenticated, async (req, res) => {
+vendaRoutes.delete('/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     await vendaService.delete(req.params.id)
     return res.status(204).send()

@@ -1,9 +1,10 @@
 import { Router } from 'express'
 import { createUser } from '../services/user.service' // Ajuste o caminho conforme sua pasta
+import { Request, Response } from "express";
 
 export const userRoutes = Router()
 
-userRoutes.post('/register', async (req, res) => {
+userRoutes.post('/register', async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body
 

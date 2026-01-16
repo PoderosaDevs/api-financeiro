@@ -1,11 +1,12 @@
 import { Router } from 'express'
 import { pagamentoService } from '../services/pagamento.service'
 import { ensureAuthenticated } from '../middlewares/auth.middleware'
+import { Request, Response } from "express";
 
 export const pagamentoRoutes = Router()
 
 // Listagem Geral
-pagamentoRoutes.get('/', async (req, res) => {
+pagamentoRoutes.get('/', async (req: Request, res: Response) => {
   try {
     const pagamentos = await pagamentoService.getAll()
     return res.json(pagamentos)
@@ -15,7 +16,7 @@ pagamentoRoutes.get('/', async (req, res) => {
 })
 
 // Cadastro Individual Manual
-pagamentoRoutes.post('/', ensureAuthenticated, async (req, res) => {
+pagamentoRoutes.post('/', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     const pagamento = await pagamentoService.create(req.body)
     return res.status(201).json(pagamento)
@@ -25,7 +26,7 @@ pagamentoRoutes.post('/', ensureAuthenticated, async (req, res) => {
 })
 
 // --- NOVA ROTA: IMPORTAÇÃO EM MASSA (PLANILHA) ---
-pagamentoRoutes.post('/import', ensureAuthenticated, async (req, res) => {
+pagamentoRoutes.post('/import', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     // O front-end deve enviar um array de objetos no corpo da requisição: { pagamentos: [...] }
     const pagamentos = Array.isArray(req.body) ? req.body : req.body.pagamentos;
@@ -43,7 +44,7 @@ pagamentoRoutes.post('/import', ensureAuthenticated, async (req, res) => {
 
 
 // Exclusão
-pagamentoRoutes.delete('/:id', ensureAuthenticated, async (req, res) => {
+pagamentoRoutes.delete('/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     await pagamentoService.delete(req.params.id)
     return res.status(204).send()
