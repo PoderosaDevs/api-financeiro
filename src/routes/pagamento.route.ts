@@ -28,19 +28,37 @@ pagamentoRoutes.post('/', ensureAuthenticated, async (req: Request, res: Respons
 // --- NOVA ROTA: IMPORTAÇÃO EM MASSA (PLANILHA) ---
 pagamentoRoutes.post('/import', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
-    // O front-end deve enviar um array de objetos no corpo da requisição: { pagamentos: [...] }
-    const pagamentos = Array.isArray(req.body) ? req.body : req.body.pagamentos;
-
-    if (!Array.isArray(pagamentos)) {
-      return res.status(400).json({ message: "Formato inválido. Esperado um array de pagamentos." });
+    // FLEXIBILIDADE DE PAYLOAD:
+    // Aceita tanto um array direto `[...]` quanto um objeto `{ pagamentos: [...] }`
+    // Isso evita erros comuns de integração front/back.
+    let dadosImportacao = req.body;
+    
+    if (req.body.pagamentos && Array.isArray(req.body.pagamentos)) {
+        dadosImportacao = req.body.pagamentos;
     }
 
-    const result = await pagamentoService.importBulk(pagamentos)
-    return res.status(201).json(result)
+    // Validação básica de segurança
+    if (!Array.isArray(dadosImportacao)) {
+      return res.status(400).json({ 
+        message: "Formato inválido. Esperado um array de pagamentos." 
+      });
+    }
+
+    console.log(`📡 [API] Recebendo ${dadosImportacao.length} itens para importação.`);
+
+    // Chama o serviço
+    const result = await pagamentoService.importBulk(dadosImportacao);
+    
+    // Retorna 201 (Created) com o resumo
+    return res.status(201).json(result);
+
   } catch (error: any) {
-    return res.status(400).json({ message: error.message })
+    console.error("❌ Erro crítico na importação:", error);
+    return res.status(400).json({ 
+      message: error.message || "Erro interno ao processar arquivo." 
+    });
   }
-})
+});
 
 
 // Exclusão

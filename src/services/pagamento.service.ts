@@ -40,116 +40,176 @@ export const pagamentoService = {
     });
   },
 
+  /**
+   * Processa a importação e realiza a "Prova Real" dos valores.
+   */
   async importBulk(pagamentos: any[]) {
-    const totalInical = pagamentos.length;
+    const totalInicial = pagamentos.length;
     console.log(
-      `\n🚀 [IMPORT] Iniciando processamento de ${totalInical} pagamentos...`
+      `\n🚀 [IMPORT] Iniciando auditoria e processamento de ${totalInicial} pagamentos...`,
     );
 
     let processados = 0;
     const falhasNf: string[] = [];
     const duplicados: string[] = [];
+    const errosValidacao: string[] = []; // Novo array para erros de conta (R$ não bate)
 
-    // 1. Busca em lote para evitar centenas de SELECTs
-    console.log(
-      `🔍 [STEP 1] Buscando vendas e pagamentos existentes no banco...`
-    );
-    const nfsNaPlanilha = pagamentos.map((p) => String(p.nf || p.nfVenda));
+    // ------------------------------------------------------------------
+    // PASSO 1: OTIMIZAÇÃO DE BUSCA
+    // ------------------------------------------------------------------
+    const nfsNaPlanilha = pagamentos
+      .map((p) => String(p.nota || p.nf || p.nfVenda))
+      .filter((nf) => nf && nf !== "undefined");
+
+    console.log(`🔍 [STEP 1] Buscando dados no banco...`);
 
     const [vendasNoBanco, pagamentosExistentes] = await Promise.all([
-      prisma.venda.findMany({ where: { nf: { in: nfsNaPlanilha } } }),
-      prisma.pagamento.findMany({ where: { nfVenda: { in: nfsNaPlanilha } } }),
+      prisma.venda.findMany({
+        where: { nf: { in: nfsNaPlanilha } },
+        // Precisamos trazer o ID e o Status atual
+        select: {
+          id: true,
+          nf: true,
+          qtdParcelas: true,
+          status: true,
+          baseIcms: true,
+        },
+      }),
+      prisma.pagamento.findMany({
+        where: { nfVenda: { in: nfsNaPlanilha } },
+        select: { vendaId: true, numeroParcela: true },
+      }),
     ]);
-    console.log(
-      `✅ [STEP 1] ${vendasNoBanco.length} vendas encontradas. ${pagamentosExistentes.length} pagamentos já registrados.`
-    );
 
     const updatesVendas: any[] = [];
     const novosPagamentos: any[] = [];
 
-    // 2. Processamento em memória (Muito rápido)
-    console.log(`⚙️ [STEP 2] Analisando regras de negócio e parcelas...`);
+    // ------------------------------------------------------------------
+    // PASSO 2: PROCESSAMENTO E VALIDAÇÃO MATEMÁTICA
+    // ------------------------------------------------------------------
 
-    pagamentos.forEach((pgto, index) => {
-      const nfRef = String(pgto.nf || pgto.nfVenda);
+    pagamentos.forEach((pgto) => {
+      // 1. Normalização de Dados
+      const nfRef = String(pgto.nota || pgto.nf).trim();
+
+      const nParcela = parseInt(
+        String(pgto.parcelaPaga || pgto.numeroParcela || 1),
+      );
+      const totalParcelasInput = parseInt(
+        String(pgto.parcelas || pgto.qtdParcelas || 1),
+      );
+
+      // Valores Financeiros (Tratamento para garantir float)
+      const valorRepasse = parseFloat(String(pgto.repasse || pgto.valor || 0)); // Líquido que entrou
+      const valComissaoVenda = parseFloat(String(pgto.comissaoVenda || 0));
+      const valComissaoFrete = parseFloat(String(pgto.comissaoFrete || 0));
+      const baseIcmsPlanilha = parseFloat(String(pgto.baseIcms || 0)); // Bruto esperado
+
+      // 2. Validação: Venda existe?
       const venda = vendasNoBanco.find((v) => v.nf === nfRef);
-
       if (!venda) {
         falhasNf.push(nfRef);
         return;
       }
 
-      const nParcela = Number(pgto.parcelaPaga || pgto.numeroParcela || 1);
-      const totalParcelasInput = Number(
-        pgto.numeroParcelas || pgto.qtdParcelas || 0
-      );
-
-      // Checar duplicidade na memória
+      // 3. Validação: Duplicidade
       const jaExiste = pagamentosExistentes.some(
-        (p) => p.vendaId === venda.id && p.numeroParcela === nParcela
+        (p) => p.vendaId === venda.id && p.numeroParcela === nParcela,
       );
       if (jaExiste) {
-        duplicados.push(`${nfRef} (Parc. ${nParcela})`);
+        duplicados.push(`NF ${nfRef} (Parc. ${nParcela})`);
         return;
       }
 
-      // Preparar Update da Venda (Imutabilidade)
-      if (venda.qtdParcelas === null && totalParcelasInput > 0) {
-        updatesVendas.push(
-          prisma.venda.update({
-            where: { id: venda.id },
-            data: { qtdParcelas: totalParcelasInput },
-          })
+      // 4. A "Prova Real" (Validação Financeira)
+      // Regra: Repasse + Comissões deve ser igual a Base ICMS (com margem de erro de centavos)
+      const somaCalculada = valorRepasse + valComissaoVenda + valComissaoFrete;
+      const diferenca = Math.abs(somaCalculada - baseIcmsPlanilha);
+
+      // Aceita erro de até R$ 0.10 por arredondamento
+      if (diferenca > 0.1 && baseIcmsPlanilha > 0) {
+        // Se a conta não fecha, podemos logar um aviso ou impedir (depende da sua regra).
+        // Aqui vou logar apenas, mas processar o pagamento.
+        console.warn(
+          `⚠️ [ALERTA FINANCEIRO] NF ${nfRef}: Conta não fecha! Repasse(${valorRepasse}) + Comissões(${valComissaoVenda}+${valComissaoFrete}) != Base(${baseIcmsPlanilha})`,
         );
-        venda.qtdParcelas = totalParcelasInput; // Atualiza ref local
       }
 
-      // Preparar Objeto de Pagamento
+      // 5. Lógica de Status e Atualização da Venda
+      let novoStatus = venda.status;
+
+      // Se for a última parcela, consideramos PAGO.
+      // Se for menor que o total, é PARCIALMENTE_PAGO.
+      if (nParcela >= totalParcelasInput) {
+        novoStatus = "PAGO";
+      } else {
+        novoStatus = "PARCIALMENTE_PAGO";
+      }
+
+      // Preparar atualização da Venda (Enriquece com dados financeiros do Marketplace)
+      // ATENÇÃO: Só atualizamos os dados financeiros da Venda se os dados vierem preenchidos
+      const dadosUpdateVenda: any = {
+        status: novoStatus,
+        // Se o excel informou parcelas, atualizamos
+        qtdParcelas:
+          totalParcelasInput > 0 ? totalParcelasInput : venda.qtdParcelas,
+      };
+
+      // Se a planilha trouxer comissões, atualizamos a venda para refletir o custo real
+      // Calculamos o líquido a receber PROJETADO para a venda total
+      if (valComissaoVenda > 0 || valComissaoFrete > 0) {
+        dadosUpdateVenda.comissaoVenda = valComissaoVenda;
+        dadosUpdateVenda.comissaoFrete = valComissaoFrete;
+        // Líquido Receber = Base ICMS (do banco ou planilha) - Comissões
+        const baseCalculo =
+          Number(venda.baseIcms) > 0
+            ? Number(venda.baseIcms)
+            : baseIcmsPlanilha;
+        dadosUpdateVenda.liquidoReceber =
+          baseCalculo - (valComissaoVenda + valComissaoFrete);
+      }
+
+      updatesVendas.push(
+        prisma.venda.update({
+          where: { id: venda.id },
+          data: dadosUpdateVenda,
+        }),
+      );
+
+      // 6. Criar o Pagamento
       novosPagamentos.push({
-        valor: Number(pgto.valor),
-        data: new Date(),
-        nfVenda: nfRef,
         vendaId: venda.id,
+        nfVenda: nfRef,
         numeroParcela: nParcela,
+        valor: valorRepasse, // Salva o Líquido (Repasse)
+        data: new Date(), // Ou pgto.data se tiver na planilha
+        // Se adicionou o campo opcional sugerido:
+        // comissaoRetida: valComissaoVenda + valComissaoFrete
       });
 
       processados++;
-
-      // Log de progresso a cada 50 itens para não poluir demais o terminal
-      if ((index + 1) % 50 === 0) {
-        console.log(
-          `⏳ [PROCESSO] Analisados: ${index + 1} / ${totalInical}...`
-        );
-      }
     });
 
-    // 3. Persistência em lote (Onde a mágica da velocidade acontece)
-    console.log(
-      `💾 [STEP 3] Gravando ${novosPagamentos.length} novos pagamentos e ${updatesVendas.length} atualizações de vendas...`
-    );
+    // ------------------------------------------------------------------
+    // PASSO 3: PERSISTÊNCIA
+    // ------------------------------------------------------------------
 
-    const inicioGravacao = Date.now();
+    if (novosPagamentos.length > 0 || updatesVendas.length > 0) {
+      console.log(
+        `💾 [STEP 3] Gravando ${novosPagamentos.length} pagamentos e atualizando vendas...`,
+      );
 
-    await prisma.$transaction([
-      ...updatesVendas,
-      prisma.pagamento.createMany({
-        data: novosPagamentos,
-        skipDuplicates: true,
-      }),
-    ]);
-
-    const fimGravacao = Date.now();
-    console.log(
-      `🏁 [FINALIZADO] Importação concluída em ${
-        (fimGravacao - inicioGravacao) / 1000
-      }s de gravação.`
-    );
-    console.log(
-      `📊 [RESUMO] Sucesso: ${processados} | NFs não encontradas: ${falhasNf.length} | Duplicados: ${duplicados.length}\n`
-    );
+      await prisma.$transaction([
+        ...updatesVendas,
+        prisma.pagamento.createMany({
+          data: novosPagamentos,
+          skipDuplicates: true,
+        }),
+      ]);
+    }
 
     return {
-      message: `${processados} pagamentos processados com sucesso.`,
+      message: `${processados} pagamentos processados.`,
       count: processados,
       skipped: falhasNf,
       duplicates: duplicados,

@@ -26,42 +26,48 @@ model Marketplace {
   @@map("marketplaces")
 }
 
+enum VendaStatus {
+  PENDENTE
+  PARCIALMENTE_PAGO
+  PAGO
+  CANCELADO
+}
+
 model Venda {
-  id              String   @id @default(uuid())
-  nf              String   @unique
-  loja            String
-  baseIcms        Decimal
-  comissaoVenda   Decimal? @map("comissao_venda")
-  comissaoFrete   Decimal? @map("comissao_frete")
-  desconto        Decimal?
-  liquidoReceber  Decimal  @map("liquido_receber")
-  
-  // --- NOVOS CAMPOS ---
-  // Define o total de vezes que a venda foi parcelada (ex: 12)
-  qtdParcelas     Int?     @map("qtd_parcelas") 
+  id             String      @id @default(uuid())
+  nf             String      @unique
+  loja           String
+  baseIcms       Decimal
+  comissaoVenda  Decimal?    @map("comissao_venda")
+  comissaoFrete  Decimal?    @map("comissao_frete")
+  desconto       Decimal?
+  liquidoReceber Decimal     @map("liquido_receber")
+  status         VendaStatus @default(PENDENTE) // <-- NOVO CAMPO
+  dataVenda      DateTime    @default(now())
+  qtdParcelas    Int?        @map("qtd_parcelas")
 
-  // Relacionamentos
-  marketplaceId   String
-  marketplace     Marketplace @relation(fields: [marketplaceId], references: [id])
-  pagamentos      Pagamento[]
+  marketplaceId String
+  marketplace   Marketplace @relation(fields: [marketplaceId], references: [id])
+  pagamentos    Pagamento[]
 
-  createdAt       DateTime @default(now())
+  createdAt DateTime @default(now())
+
   @@map("vendas")
 }
 
 model Pagamento {
-  id            String   @id @default(uuid())
-  valor         Decimal
-  data          DateTime
-  nfVenda       String   @map("nf_venda")
-  
-  // --- NOVOS CAMPOS ---
-  // Define qual é o número desta parcela específica (ex: 1, 2, 3...)
-  numeroParcela Int?     @map("numero_parcela")
+  id      String   @id @default(uuid())
+  valor   Decimal
+  data    DateTime
+  nfVenda String   @map("nf_venda")
+
+  // SUGESTÃO: Guarde isso para auditoria futura (opcional mas recomendado)
+  comissaoRetida Decimal? @map("comissao_retida") @db.Decimal(10, 2)
+  numeroParcela  Int?     @map("numero_parcela")
 
   // Relacionamento com Venda
-  vendaId       String
-  venda         Venda    @relation(fields: [vendaId], references: [id])
+  vendaId String
+  venda   Venda  @relation(fields: [vendaId], references: [id])
 
   @@map("pagamentos")
 }

@@ -31,23 +31,21 @@ vendaRoutes.post('/', ensureAuthenticated, async (req: Request, res: Response) =
 // IMPORTAÇÃO EM MASSA (Planilha)
 vendaRoutes.post('/import', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
-    // Se o Front-end enviar o array direto no body, usamos req.body
-    // Se enviar como { vendas: [] }, mantemos o const { vendas } = req.body
     const vendas = Array.isArray(req.body) ? req.body : req.body.vendas;
 
     if (!Array.isArray(vendas)) {
       return res.status(400).json({ message: "Formato inválido. Esperado um array de vendas." });
     }
 
-    const result = await vendaService.createMany(vendas)
+    // Chama o service modificado
+    const result = await vendaService.createMany(vendas);
 
-    // Retornamos o objeto completo do service: { count, skipped, message }
-    // Isso permite que o Front-end mostre o alerta de NFs puladas
-    return res.status(201).json(result)
+    return res.status(201).json(result);
   } catch (error: any) {
-    return res.status(400).json({ message: error.message })
+    console.error("Erro importação:", error);
+    return res.status(400).json({ message: error.message || "Erro ao importar vendas" });
   }
-})
+});
 
 // Atualização
 vendaRoutes.put('/:id', ensureAuthenticated, async (req: Request, res: Response) => {
