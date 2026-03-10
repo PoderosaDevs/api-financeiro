@@ -1,8 +1,8 @@
 import { prisma } from '../prisma/client'
 
-export async function createMarketplace(titulo: string) {
+export async function createMarketplace(titulo: string, freteParte: boolean) {
   return await prisma.marketplace.create({
-    data: { titulo }
+    data: { titulo, freteParte } 
   })
 }
 
@@ -21,10 +21,10 @@ export async function getMarketplaceById(id: string) {
   return marketplace
 }
 
-export async function updateMarketplace(id: string, titulo: string) {
+export async function updateMarketplace(id: string, titulo: string, freteParte: boolean) {
   return await prisma.marketplace.update({
     where: { id },
-    data: { titulo }
+    data: { titulo, freteParte }
   })
 }
 

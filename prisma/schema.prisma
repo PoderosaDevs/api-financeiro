@@ -21,6 +21,9 @@ model User {
 model Marketplace {
   id     String  @id @default(uuid())
   titulo String
+
+  freteParte Boolean @default(false) @map("frete_parte")
+
   vendas Venda[]
 
   @@map("marketplaces")
@@ -29,8 +32,13 @@ model Marketplace {
 enum VendaStatus {
   PENDENTE
   PARCIALMENTE_PAGO
+  PARCIALMENTE_REEMBOLSADO
+  PARCIALMENTE_CONTESTACAO
+  REEMBOLSADO
+  CONTESTACAO
   PAGO
   CANCELADO
+  FINALIZADO
 }
 
 model Venda {
@@ -42,10 +50,15 @@ model Venda {
   comissaoFrete  Decimal?    @map("comissao_frete")
   desconto       Decimal?
   liquidoReceber Decimal     @map("liquido_receber")
-  status         VendaStatus @default(PENDENTE) // <-- NOVO CAMPO
+  status         VendaStatus @default(PENDENTE)
   dataVenda      DateTime    @default(now())
   qtdParcelas    Int?        @map("qtd_parcelas")
 
+  freteTransportadora String?     @map("frete_transportadora")
+  fretePago     Boolean     @default(false) @map("frete_pago")
+  NumeroFatura String?     @map("numero_fatura")
+
+  observacao     String?
   marketplaceId String
   marketplace   Marketplace @relation(fields: [marketplaceId], references: [id])
   pagamentos    Pagamento[]
@@ -54,6 +67,8 @@ model Venda {
 
   @@map("vendas")
 }
+
+
 
 model Pagamento {
   id      String   @id @default(uuid())
@@ -70,4 +85,13 @@ model Pagamento {
   venda   Venda  @relation(fields: [vendaId], references: [id])
 
   @@map("pagamentos")
+}
+
+
+model Transferencias {
+  id      String   @id @default(uuid())
+  valor   Decimal
+  data    DateTime
+  nfVenda String   @map("nf_venda")
+
 }
