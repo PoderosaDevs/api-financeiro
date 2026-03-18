@@ -19,12 +19,10 @@ model User {
 }
 
 model Marketplace {
-  id     String  @id @default(uuid())
-  titulo String
-
+  id         String  @id @default(uuid())
+  titulo     String
   freteParte Boolean @default(false) @map("frete_parte")
-
-  vendas Venda[]
+  vendas     Venda[]
 
   @@map("marketplaces")
 }
@@ -34,64 +32,90 @@ enum VendaStatus {
   PARCIALMENTE_PAGO
   PARCIALMENTE_REEMBOLSADO
   PARCIALMENTE_CONTESTACAO
+  PARCIALMENTE_DEVOLVIDO
   REEMBOLSADO
   CONTESTACAO
+  DEVOLVIDO
   PAGO
   CANCELADO
   FINALIZADO
 }
 
 model Venda {
-  id             String      @id @default(uuid())
-  nf             String      @unique
-  loja           String
-  baseIcms       Decimal
-  comissaoVenda  Decimal?    @map("comissao_venda")
-  comissaoFrete  Decimal?    @map("comissao_frete")
-  desconto       Decimal?
-  liquidoReceber Decimal     @map("liquido_receber")
-  status         VendaStatus @default(PENDENTE)
-  dataVenda      DateTime    @default(now())
-  qtdParcelas    Int?        @map("qtd_parcelas")
-
+  id                  String      @id @default(uuid())
+  nf                  String      @unique
+  loja                String
+  baseIcms            Decimal
+  comissaoVenda       Decimal?    @map("comissao_venda")
+  comissaoFrete       Decimal?    @map("comissao_frete")
+  frete_e_taxas       Decimal?    @map("frete_e_taxas")
+  desconto            Decimal?
+  liquidoReceber      Decimal     @map("liquido_receber")
+  status              VendaStatus @default(PENDENTE)
+  dataVenda           DateTime    @default(now())
+  qtdParcelas         Int?        @map("qtd_parcelas")
   freteTransportadora String?     @map("frete_transportadora")
-  fretePago     Boolean     @default(false) @map("frete_pago")
-  NumeroFatura String?     @map("numero_fatura")
+  fretePago           Boolean     @default(false) @map("frete_pago")
+  NumeroFatura        String?     @map("numero_fatura")
+  observacao          String?
+  marketplaceId       String
+  marketplace         Marketplace @relation(fields: [marketplaceId], references: [id])
+  
+  pagamentos          Pagamento[]
+  reembolsos          Reembolso[]
+  devolucoes          Devolucao[]
 
-  observacao     String?
-  marketplaceId String
-  marketplace   Marketplace @relation(fields: [marketplaceId], references: [id])
-  pagamentos    Pagamento[]
-
-  createdAt DateTime @default(now())
+  createdAt           DateTime    @default(now())
 
   @@map("vendas")
 }
 
-
-
 model Pagamento {
-  id      String   @id @default(uuid())
-  valor   Decimal
-  data    DateTime
-  nfVenda String   @map("nf_venda")
-
-  // SUGESTÃO: Guarde isso para auditoria futura (opcional mas recomendado)
-  comissaoRetida Decimal? @map("comissao_retida") @db.Decimal(10, 2)
+  id             String   @id @default(uuid())
+  valor          Decimal
+  data           DateTime
+  nfVenda        String   @map("nf_venda")
+  loja           String?
   numeroParcela  Int?     @map("numero_parcela")
-
-  // Relacionamento com Venda
-  vendaId String
-  venda   Venda  @relation(fields: [vendaId], references: [id])
+  comissaoRetida Decimal? @map("comissao_retida") @db.Decimal(10, 2)
+  vendaId        String
+  venda          Venda    @relation(fields: [vendaId], references: [id])
 
   @@map("pagamentos")
 }
 
+model Reembolso {
+  id            String   @id @default(uuid())
+  data          DateTime
+  nfVenda       String   @map("nf_venda")
+  loja          String
+  valor         Decimal  @map("valor_repasse")
+  comissaoVenda Decimal? @map("comissao_venda")
+  comissaoFrete Decimal? @map("comissao_frete")
+  baseIcms      Decimal? @map("base_icms")
+  parcelaPaga   Int?     @map("parcela_paga")
+  totalParcelas Int?     @map("total_parcelas")
+  vendaId       String
+  venda         Venda    @relation(fields: [vendaId], references: [id])
+  createdAt     DateTime @default(now()) @map("created_at")
 
-model Transferencias {
-  id      String   @id @default(uuid())
-  valor   Decimal
-  data    DateTime
-  nfVenda String   @map("nf_venda")
+  @@map("reembolsos")
+}
 
+model Devolucao {
+  id              String   @id @default(uuid())
+  data            DateTime
+  nfVenda         String   @map("nf_venda")
+  valorBase       Decimal  @map("valor_base")
+  numeroDevolucao String   @unique @map("numero_devolucao")
+  valor           Decimal
+  saldo           Decimal? @default(0)
+  tratativa       String
+  motivo          String
+  loja            String
+  vendaId         String
+  venda           Venda    @relation(fields: [vendaId], references: [id])
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("devolucoes")
 }

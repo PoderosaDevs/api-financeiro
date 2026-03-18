@@ -1,0 +1,202 @@
+import { prisma } from "../prisma/client";
+import { VendaStatus } from "@prisma/client";
+
+export const transferenciaService = {
+  async importReembolsos(reembolsos: any[]) {
+    const nfs = [
+      ...new Set(
+        reembolsos
+          .map((r) => String(r.nota || r.nf || r.nfVenda).trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    const [vendas, reembolsosExistentes] = await Promise.all([
+      prisma.venda.findMany({
+        where: { nf: { in: nfs } },
+        select: { id: true, nf: true, liquidoReceber: true },
+      }),
+      prisma.reembolso.findMany({
+        where: { nfVenda: { in: nfs } },
+        select: { vendaId: true, valor: true, parcelaPaga: true },
+      }),
+    ]);
+
+    const vendasMap = new Map(vendas.map((v) => [v.nf, v]));
+    const reembolsosMap = new Map();
+    const acumuladoMap = new Map<string, number>();
+
+    for (const r of reembolsosExistentes) {
+      const key = `${r.vendaId}-${r.parcelaPaga}`;
+      reembolsosMap.set(key, true);
+
+      const atual = acumuladoMap.get(r.vendaId) || 0;
+      acumuladoMap.set(r.vendaId, atual + Number(r.valor));
+    }
+
+    let processados = 0;
+    const falhasNf: string[] = [];
+    const duplicados: string[] = [];
+    const updatesVendas: any[] = [];
+    const novosReembolsos: any[] = [];
+
+    for (const remb of reembolsos) {
+      const nfRef = String(remb.nota || remb.nf || remb.nfVenda).trim();
+      const venda = vendasMap.get(nfRef);
+
+      if (!venda) {
+        falhasNf.push(nfRef);
+        continue;
+      }
+
+      const valorReembolso = Math.abs(parseFloat(String(remb.repasse || remb.valor || 0)));
+      const nParcela = parseInt(String(remb.parcelaPaga || 1));
+      const key = `${venda.id}-${nParcela}`;
+
+      if (reembolsosMap.has(key)) {
+        duplicados.push(`NF ${nfRef} (Remb. Parc ${nParcela})`);
+        continue;
+      }
+
+      const jaReembolsado = acumuladoMap.get(venda.id) || 0;
+      const totalAposEste = jaReembolsado + valorReembolso;
+      acumuladoMap.set(venda.id, totalAposEste);
+
+      const novoStatus =
+        totalAposEste >= Number(venda.liquidoReceber)
+          ? VendaStatus.REEMBOLSADO
+          : VendaStatus.PARCIALMENTE_REEMBOLSADO;
+
+      updatesVendas.push(
+        prisma.venda.update({
+          where: { id: venda.id },
+          data: { status: novoStatus },
+        })
+      );
+
+      novosReembolsos.push({
+        vendaId: venda.id,
+        nfVenda: nfRef,
+        data: new Date(remb.data || new Date()),
+        valor: valorReembolso,
+        loja: String(remb.loja || ""),
+        comissaoVenda: parseFloat(String(remb.comissaoVenda || 0)),
+        comissaoFrete: parseFloat(String(remb.comissaoFrete || 0)),
+        baseIcms: parseFloat(String(remb.baseIcms || 0)),
+        parcelaPaga: nParcela,
+        totalParcelas: parseInt(String(remb.parcelas || 1)),
+      });
+
+      reembolsosMap.set(key, true);
+      processados++;
+    }
+
+    if (novosReembolsos.length > 0) {
+      await prisma.$transaction([
+        ...updatesVendas,
+        prisma.reembolso.createMany({ data: novosReembolsos }),
+      ]);
+    }
+
+    return { count: processados, skipped: falhasNf, duplicates: duplicados };
+  },
+
+  async importDevolucoes(devolucoes: any[]) {
+    const nfs = [
+      ...new Set(
+        devolucoes
+          .map((d) => String(d.nf || d.nfVenda).trim())
+          .filter(Boolean)
+      ),
+    ];
+
+    const vendas = await prisma.venda.findMany({
+      where: { nf: { in: nfs } },
+      select: { id: true, nf: true },
+    });
+
+    const vendasMap = new Map(vendas.map((v) => [v.nf, v]));
+
+    let processados = 0;
+    const falhasNf: string[] = [];
+    const updatesVendas: any[] = [];
+    const novasDevolucoes: any[] = [];
+
+    for (const dev of devolucoes) {
+      const nfRef = String(dev.nf || dev.nfVenda).trim();
+      const venda = vendasMap.get(nfRef);
+
+      if (!venda) {
+        falhasNf.push(nfRef);
+        continue;
+      }
+
+      const tratativa = String(dev.tratativa || "").toUpperCase();
+      const novoStatus =
+        tratativa.includes("TOTAL") || tratativa === "DEVOLUCAO TOTAL"
+          ? VendaStatus.DEVOLVIDO
+          : VendaStatus.PARCIALMENTE_DEVOLVIDO;
+
+      updatesVendas.push(
+        prisma.venda.update({
+          where: { id: venda.id },
+          data: { status: novoStatus },
+        })
+      );
+
+      novasDevolucoes.push({
+        vendaId: venda.id,
+        nfVenda: nfRef,
+        data: new Date(dev.data || new Date()),
+        valorBase: parseFloat(String(dev.valorBase || dev.base || 0)),
+        numeroDevolucao: String(dev.numeroDevolucao || dev.devolucao || Date.now().toString()),
+        valor: parseFloat(String(dev.valor || 0)),
+        saldo: parseFloat(String(dev.saldo || 0)),
+        tratativa: tratativa,
+        motivo: String(dev.motivo || ""),
+        loja: String(dev.loja || ""),
+      });
+
+      processados++;
+    }
+
+    if (novasDevolucoes.length > 0) {
+      await prisma.$transaction([
+        ...updatesVendas,
+        prisma.devolucao.createMany({
+          data: novasDevolucoes,
+          skipDuplicates: true,
+        }),
+      ]);
+    }
+
+    return { count: processados, skipped: falhasNf };
+  },
+
+  async getAllDevolucoes() {
+    return await prisma.devolucao.findMany({
+      include: { venda: true },
+      orderBy: { data: "desc" },
+    });
+  },
+
+  async getDevolucaoById(id: string) {
+    return await prisma.devolucao.findUnique({
+      where: { id },
+      include: { venda: true },
+    });
+  },
+
+  async updateDevolucao(id: string, data: any) {
+    return await prisma.devolucao.update({
+      where: { id },
+      data,
+    });
+  },
+
+  async deleteDevolucao(id: string) {
+    return await prisma.devolucao.delete({
+      where: { id },
+    });
+  },
+};

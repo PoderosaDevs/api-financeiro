@@ -11,7 +11,28 @@ export const vendaService = {
         // Ordena os pagamentos internos para a barra de progresso ficar certa
         pagamentos: {
             orderBy: { numeroParcela: 'asc' }
+        },
+        devolucoes: true,
+        reembolsos: true,
+
+      },
+      // Ordena pela data que a venda aconteceu, do mais novo pro mais velho
+      orderBy: { dataVenda: "desc" }, 
+    });
+  },
+
+   async getAllFrete() {
+    return await prisma.venda.findMany({
+      include: { 
+        marketplace: true, 
+        pagamentos: {
+            orderBy: { numeroParcela: 'asc' }
         }
+      },
+      where: {
+        marketplace: {
+          freteParte: true
+        }, 
       },
       // Ordena pela data que a venda aconteceu, do mais novo pro mais velho
       orderBy: { dataVenda: "desc" }, 
@@ -126,6 +147,96 @@ export const vendaService = {
     return {
       count: result.count,
       message: `${result.count} vendas importadas com sucesso.`,
+    };
+  },
+
+  // --- IMPORTAÇÃO EM MASSA (FRETES) ---
+  async processarFretesEmMassa(planilhaFretes: any[]) {
+    // 1. Normaliza as NFs que vieram da planilha para buscar no banco
+    const nfsPlanilha = planilhaFretes
+      .filter((item) => item.nf)
+      .map((item) => String(item.nf));
+
+    if (nfsPlanilha.length === 0) {
+      return { successCount: 0, errors: [] };
+    }
+
+    // 2. Busca os registros no banco para ver o que existe e o que já foi pago
+    const vendasNoBanco = await prisma.venda.findMany({
+      where: { nf: { in: nfsPlanilha } },
+      select: { 
+        id: true, // Trazemos o ID para fazer o update com segurança
+        nf: true, 
+        fretePago: true 
+      },
+    });
+
+    // Cria um mapa (Dicionário) para busca super rápida: { "1234": { id: "...", fretePago: false } }
+    const mapaVendasDb = new Map(
+      vendasNoBanco.map((v) => [v.nf, { id: v.id, fretePago: v.fretePago }])
+    );
+
+    const paraAtualizar = [];
+    const errors = [];
+
+    // 3. Classifica os dados da planilha (O que vai atualizar x O que dá erro)
+    for (const item of planilhaFretes) {
+      const nf = String(item.nf);
+      const vendaDb = mapaVendasDb.get(nf);
+
+      // Regra 1: A nota nem existe no banco
+      if (!vendaDb) {
+        errors.push({
+          nf: nf,
+          fatura: item.fatura || "",
+          loja: item.loja || "DESCONHECIDA",
+          motivo: "NÃO ENCONTRADO",
+        });
+        continue;
+      }
+
+      // Regra 2: A nota existe, mas o frete JÁ FOI PAGO
+      if (vendaDb.fretePago) {
+        errors.push({
+          nf: nf,
+          fatura: item.fatura || "",
+          loja: item.loja || "DESCONHECIDA",
+          motivo: "JÁ PAGO",
+        });
+        continue;
+      }
+
+      // Regra 3: Tudo certo, separa para atualizar
+      paraAtualizar.push({
+        id: vendaDb.id, // Usamos o ID do banco para não dar erro de constraint
+        NumeroFatura: item.fatura || null, // Se vier vazio, salva como null
+      });
+    }
+
+    // Se não houver nada válido para atualizar, já retorna os erros
+    if (paraAtualizar.length === 0) {
+      return { successCount: 0, errors };
+    }
+
+    // 4. Executa a atualização no banco de dados usando $transaction
+    // O Prisma não tem um updateMany dinâmico (com faturas diferentes pra cada linha), 
+    // então criamos um array de promises e rodamos na transaction.
+    const transacoesUpdate = paraAtualizar.map((dados) =>
+      prisma.venda.update({
+        where: { id: dados.id },
+        data: {
+          fretePago: true, // Muda o status para pago
+          NumeroFatura: dados.NumeroFatura, // Salva a fatura que veio do excel
+        },
+      })
+    );
+
+    await prisma.$transaction(transacoesUpdate);
+
+    // 5. Retorna o formato exato que o Front-end está esperando
+    return {
+      successCount: paraAtualizar.length,
+      errors: errors,
     };
   },
 

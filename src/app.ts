@@ -5,6 +5,7 @@ import { userRoutes } from './routes/user.route'
 import { marketplaceRoutes } from './routes/marketplace.route'
 import { vendaRoutes } from './routes/venda.route'
 import { pagamentoRoutes } from './routes/pagamento.route'
+import { transferenciaRoutes } from './routes/transferencia.route'
 
 const app = express()
 
@@ -16,10 +17,12 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Registro das Rotas da Aplicação
-app.use('/auth', authRoutes)        // Login e Autenticação
-app.use('/users', userRoutes)       // Cadastro e Gestão de Usuários
-app.use('/marketplaces', marketplaceRoutes) // CRUD de Marketplaces
-app.use('/vendas', vendaRoutes)     // CRUD de Vendas com cálculo de líquido
-app.use('/pagamentos', pagamentoRoutes) // CRUD de Pagamentos vinculados
+app.use('/auth', authRoutes)       
+app.use('/users', userRoutes)       
+app.use('/marketplaces', marketplaceRoutes) 
+app.use('/vendas', vendaRoutes)    
+app.use('/pagamentos', pagamentoRoutes)
+app.use('/transferencias', transferenciaRoutes) 
+
 
 export { app }

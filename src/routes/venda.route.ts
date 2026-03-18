@@ -11,6 +11,12 @@ vendaRoutes.get('/', async (req: Request, res: Response) => {
   return res.json(vendas)
 })
 
+// Listagem Geral do Frete
+vendaRoutes.get('/frete', async (req: Request, res: Response) => {
+  const vendas = await vendaService.getAllFrete()
+  return res.json(vendas)
+})
+
 // Busca Única
 vendaRoutes.get('/:id', async (req: Request, res: Response) => {
   const venda = await vendaService.getById(req.params.id)
@@ -47,6 +53,26 @@ vendaRoutes.post('/import', ensureAuthenticated, async (req: Request, res: Respo
   }
 });
 
+// IMPORTAÇÃO EM MASSA (Planilha de Fretes)
+vendaRoutes.post('/frete/import', ensureAuthenticated, async (req: Request, res: Response) => {
+  try {
+    // Pega o array que o frontend enviou (tratando caso venha solto ou dentro de uma chave)
+    const planilhaFretes = Array.isArray(req.body) ? req.body : req.body.fretes || req.body.data;
+
+    if (!Array.isArray(planilhaFretes)) {
+      return res.status(400).json({ message: "Formato inválido. Esperado um array de fretes." });
+    }
+
+    // Chama o novo service focado em checar e atualizar os fretes
+    const result = await vendaService.processarFretesEmMassa(planilhaFretes);
+
+    // Retorna 200 (OK) enviando exatamente o { successCount, errors } que o frontend espera
+    return res.status(200).json(result);
+  } catch (error: any) {
+    console.error("Erro na importação de fretes:", error);
+    return res.status(400).json({ message: error.message || "Erro ao importar faturas de frete" });
+  }
+});
 // Atualização
 vendaRoutes.put('/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {

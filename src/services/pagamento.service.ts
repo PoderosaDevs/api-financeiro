@@ -103,6 +103,7 @@ export const pagamentoService = {
       const valorRepasse = parseFloat(String(pgto.repasse || pgto.valor || 0)); // Líquido que entrou
       const valComissaoVenda = parseFloat(String(pgto.comissaoVenda || 0));
       const valComissaoFrete = parseFloat(String(pgto.comissaoFrete || 0));
+      const valFreteTaxas = parseFloat(String(pgto.frete_e_taxas || 0));
       const baseIcmsPlanilha = parseFloat(String(pgto.baseIcms || 0)); // Bruto esperado
 
       // 2. Validação: Venda existe?
@@ -123,7 +124,7 @@ export const pagamentoService = {
 
       // 4. A "Prova Real" (Validação Financeira)
       // Regra: Repasse + Comissões deve ser igual a Base ICMS (com margem de erro de centavos)
-      const somaCalculada = valorRepasse + valComissaoVenda + valComissaoFrete;
+      const somaCalculada = valorRepasse + valComissaoVenda + valComissaoFrete + valFreteTaxas;
       const diferenca = Math.abs(somaCalculada - baseIcmsPlanilha);
 
       // Aceita erro de até R$ 0.10 por arredondamento
@@ -131,7 +132,7 @@ export const pagamentoService = {
         // Se a conta não fecha, podemos logar um aviso ou impedir (depende da sua regra).
         // Aqui vou logar apenas, mas processar o pagamento.
         console.warn(
-          `⚠️ [ALERTA FINANCEIRO] NF ${nfRef}: Conta não fecha! Repasse(${valorRepasse}) + Comissões(${valComissaoVenda}+${valComissaoFrete}) != Base(${baseIcmsPlanilha})`,
+          `⚠️ [ALERTA FINANCEIRO] NF ${nfRef}: Conta não fecha! Repasse(${valorRepasse}) + Comissões(${valComissaoVenda}+${valComissaoFrete}) + Frete e Taxas(${valFreteTaxas}) != Base(${baseIcmsPlanilha})`,
         );
       }
 
@@ -160,13 +161,15 @@ export const pagamentoService = {
       if (valComissaoVenda > 0 || valComissaoFrete > 0) {
         dadosUpdateVenda.comissaoVenda = valComissaoVenda;
         dadosUpdateVenda.comissaoFrete = valComissaoFrete;
+        dadosUpdateVenda.frete_e_taxas = valFreteTaxas;
+
         // Líquido Receber = Base ICMS (do banco ou planilha) - Comissões
         const baseCalculo =
           Number(venda.baseIcms) > 0
             ? Number(venda.baseIcms)
             : baseIcmsPlanilha;
         dadosUpdateVenda.liquidoReceber =
-          baseCalculo - (valComissaoVenda + valComissaoFrete);
+          baseCalculo - (valComissaoVenda + valComissaoFrete + valFreteTaxas);
       }
 
       updatesVendas.push(
