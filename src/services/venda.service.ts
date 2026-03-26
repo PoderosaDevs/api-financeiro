@@ -1,42 +1,208 @@
-import { VendaStatus } from "@prisma/client";
+import { VendaStatus, Prisma } from "@prisma/client";
 import { prisma } from "../prisma/client";
-
+import { getIntervaloDatas } from "../utils/getIntervaloDatas";
 export const vendaService = {
-  // --- BUSCAS ---
-  // --- BUSCAS ---
-  async getAll() {
-    return await prisma.venda.findMany({
-      include: { 
-        marketplace: true, 
-        // Ordena os pagamentos internos para a barra de progresso ficar certa
-        pagamentos: {
-            orderBy: { numeroParcela: 'asc' }
+  // --- BUSCAS PAGINADAS ---
+ async getAll(
+    page: number = 1,
+    limit: number = 50,
+    dataInicio?: string,
+    dataFim?: string,
+    status?: string,
+    marketplaceId?: string,
+  ) {
+    const skip = (page - 1) * limit;
+    const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
+
+    // O segredo está no "as VendaStatus[]"
+    const statusArray = status 
+      ? (status.split(",") as VendaStatus[]) 
+      : undefined;
+
+    const where: Prisma.VendaWhereInput = {
+      dataVenda: { gte: inicio, lte: fim },
+      ...(statusArray && { status: { in: statusArray } }),
+      ...(marketplaceId && { marketplaceId }),
+    };
+
+    const [vendas, total] = await Promise.all([
+      prisma.venda.findMany({
+        where,
+        skip,
+        take: limit,
+        include: {
+          marketplace: true,
+          pagamentos: { orderBy: { numeroParcela: "asc" } },
+          devolucoes: true,
+          reembolsos: true,
         },
+        orderBy: { dataVenda: "desc" },
+      }),
+      prisma.venda.count({ where }),
+    ]);
+
+    return {
+      data: vendas,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  },
+
+  // --- SUMÁRIO DE MÉTRICAS (RESOLVE O PROBLEMA DO LIMIT 50) ---
+
+  async getSummary(dataInicio?: string, dataFim?: string) {
+    const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
+
+    const where = {
+      dataVenda: { gte: inicio, lte: fim },
+    };
+
+    const [vendasAgregadas, pagamentosAgregados, totalVendas] =
+      await Promise.all([
+        // 1. Agregação de valores das vendas no período
+        prisma.venda.aggregate({
+          where,
+          _sum: {
+            baseIcms: true, // Valor Bruto
+            comissaoVenda: true,
+            comissaoFrete: true,
+            frete_e_taxas: true,
+            liquidoReceber: true,
+          },
+        }),
+        // 2. Soma de todos os pagamentos (Dinheiro que efetivamente entrou)
+        prisma.pagamento.aggregate({
+          where: {
+            venda: where,
+          },
+          _sum: {
+            valor: true,
+          },
+        }),
+        // 3. Contagem total
+        prisma.venda.count({ where }),
+      ]);
+
+    // --- CÁLCULOS ---
+
+    // 1. Receita Bruta: Soma de toda a Base ICMS do período
+    const receitaBruta = Number(vendasAgregadas._sum.baseIcms || 0);
+
+    // 2. Receita Recebida: Total líquido que já caiu na conta (soma da tabela Pagamento)
+    const receitaRecebida = Number(pagamentosAgregados._sum.valor || 0);
+
+    // 3. Falta Receber:
+    // É a soma do valor BRUTO das vendas que ainda não foram totalmente pagas.
+    // Buscamos vendas do período onde o status é PENDENTE ou PARCIAL.
+    const vendasPendentes = await prisma.venda.aggregate({
+      where: {
+        ...where,
+        status: { in: ["PENDENTE"] }, // Ajuste conforme seus enums
+      },
+      _sum: {
+        baseIcms: true,
+      },
+    });
+    const faltaReceber = Number(vendasPendentes._sum.baseIcms || 0);
+
+    // 4. Comissões Descontadas: Total de taxas de venda e frete
+    const comissoesDescontadas =
+      Number(vendasAgregadas._sum.comissaoVenda || 0) +
+      Number(vendasAgregadas._sum.comissaoFrete || 0);
+
+    // 5. Fretes e Tarifas: Soma do campo específico
+    const fretesETarifas = Number(vendasAgregadas._sum.frete_e_taxas || 0);
+
+    return {
+      vendasNoPeriodo: totalVendas,
+      receitaBruta: Number(receitaBruta.toFixed(2)),
+      faltaReceber: Number(faltaReceber.toFixed(2)),
+      receitaRecebida: Number(receitaRecebida.toFixed(2)),
+      comissoesDescontadas: Number(comissoesDescontadas.toFixed(2)),
+      fretesETarifas: Number(fretesETarifas.toFixed(2)),
+    };
+  },
+
+  // --- EXPORTAÇÃO COM FILTROS AVANÇADOS ---
+  async getExportData(filters: {
+    startDate?: string;
+    endDate?: string;
+    marketplaceId?: string;
+    status?: string;
+  }) {
+    // Usamos o seu util aqui também para manter o padrão de 00:00:00 e 23:59:59
+    const { inicio, fim } = getIntervaloDatas(
+      filters.startDate,
+      filters.endDate,
+    );
+
+    const where: any = {
+      dataVenda: { gte: inicio, lte: fim },
+    };
+
+    if (filters.marketplaceId && filters.marketplaceId !== "all") {
+      where.marketplaceId = filters.marketplaceId;
+    }
+
+    if (filters.status && filters.status !== "all") {
+      where.status = filters.status;
+    }
+
+    return await prisma.venda.findMany({
+      where,
+      include: {
+        marketplace: true,
+        pagamentos: true,
         devolucoes: true,
         reembolsos: true,
-
       },
-      // Ordena pela data que a venda aconteceu, do mais novo pro mais velho
-      orderBy: { dataVenda: "desc" }, 
+      orderBy: { dataVenda: "asc" },
     });
   },
 
-   async getAllFrete() {
-    return await prisma.venda.findMany({
-      include: { 
-        marketplace: true, 
-        pagamentos: {
-            orderBy: { numeroParcela: 'asc' }
-        }
-      },
-      where: {
-        marketplace: {
-          freteParte: true
-        }, 
-      },
-      // Ordena pela data que a venda aconteceu, do mais novo pro mais velho
-      orderBy: { dataVenda: "desc" }, 
-    });
+  // --- LISTAGEM DE FRETES (LOGÍSTICA) ---
+  async getAllFrete(
+    page: number = 1,
+    limit: number = 50,
+    search?: string,
+    status?: string,
+  ) {
+    const skip = (page - 1) * limit;
+
+    const whereClause: any = {
+      marketplace: { freteParte: true },
+    };
+
+    if (search) {
+      whereClause.OR = [
+        { nf: { contains: search, mode: "insensitive" } },
+        { NumeroFatura: { contains: search, mode: "insensitive" } },
+      ];
+    }
+
+    if (status === "pago") {
+      whereClause.fretePago = true;
+    } else if (status === "pendente") {
+      whereClause.fretePago = false;
+    }
+
+    const [vendas, total] = await prisma.$transaction([
+      prisma.venda.findMany({
+        skip,
+        take: limit,
+        where: whereClause,
+        include: {
+          marketplace: true,
+          pagamentos: { orderBy: { numeroParcela: "asc" } },
+        },
+        orderBy: { dataVenda: "desc" },
+      }),
+      prisma.venda.count({ where: whereClause }),
+    ]);
+
+    return { vendas, total };
   },
 
   async getById(id: string) {
@@ -46,9 +212,8 @@ export const vendaService = {
     });
   },
 
-  // --- CRIAÇÃO UNITÁRIA ---
+  // --- CRIAÇÃO E ATUALIZAÇÃO ---
   async create(data: any) {
-    // Normalização: evita erro de 'nf: undefined'
     const nfRef = data.nf || data.nfVenda;
     if (!nfRef) throw new Error("O número da NF é obrigatório.");
 
@@ -73,198 +238,113 @@ export const vendaService = {
         comissaoFrete: Number(data.comissaoFrete || 0),
         desconto: Number(data.desconto || 0),
         liquidoReceber: liquido,
-        // Define parcelas se enviado, caso contrário null
         qtdParcelas: data.qtdParcelas ? Number(data.qtdParcelas) : null,
       },
     });
   },
 
-  // --- IMPORTAÇÃO EM MASSA (VENDAS) ---
-  // vendaService.ts
-
   async createMany(vendas: any[]) {
-    // 1. Normaliza as NFs para verificação de duplicidade
     const nfsPlanilha = vendas.filter((v) => v.nf).map((v) => String(v.nf));
-
-    // 2. Busca NFs já existentes no banco
     const existentes = await prisma.venda.findMany({
       where: { nf: { in: nfsPlanilha } },
       select: { nf: true },
     });
-    const nfsExistentes = new Set(existentes.map((v) => v.nf)); // Set é mais rápido para buscas
+    const nfsExistentes = new Set(existentes.map((v) => v.nf));
 
-    // 3. Filtra e Mapeia os novos dados
     const paraCadastrar = vendas
-      .filter((v) => {
-        const nf = String(v.nf);
-        return nf && !nfsExistentes.has(nf);
-      })
+      .filter((v) => v.nf && !nfsExistentes.has(String(v.nf)))
       .map((v) => {
         const base = Number(v.baseIcms || 0);
-
-        // Tratamento da Data: se vier vazia, usa a data atual
-        let dataVendaDb = new Date();
-        if (v.dataVenda) {
-          // Tenta converter. Se for inválido, mantém a data atual ou null (depende do seu schema)
-          const parsed = new Date(v.dataVenda);
-          if (!isNaN(parsed.getTime())) {
-            dataVendaDb = parsed;
-          }
-        }
-
         return {
           nf: String(v.nf),
-          loja: v.loja || "LOJA PADRAO", // Garante que não quebre se vier vazio
-          marketplaceId: v.marketplaceId || null, // Front pode mandar null
-
+          loja: v.loja || "LOJA PADRAO",
+          marketplaceId: v.marketplaceId || null,
           baseIcms: base,
-          dataVenda: dataVendaDb, // Campo NOVO adicionado
-
-          // Campos que o front parou de mandar, mas o banco exige (preenchemos com padrão)
+          dataVenda: v.dataVenda ? new Date(v.dataVenda) : new Date(),
           comissaoVenda: 0,
           comissaoFrete: 0,
           desconto: 0,
-          liquidoReceber: 0, // Inicialmente o líquido é igual a base (sem descontos)
-
-          status: VendaStatus.PENDENTE, // Status padrão inicial
+          liquidoReceber: 0,
+          status: VendaStatus.PENDENTE,
           qtdParcelas: 0,
         };
       });
 
-    if (paraCadastrar.length === 0) {
-      return {
-        count: 0,
-        message: "Todas as NFs da planilha já existem no sistema.",
-      };
-    }
+    if (paraCadastrar.length === 0)
+      return { count: 0, message: "Sem novas NFs para importar." };
 
-    // 4. Salva no banco
     const result = await prisma.venda.createMany({
       data: paraCadastrar,
       skipDuplicates: true,
     });
-
     return {
       count: result.count,
-      message: `${result.count} vendas importadas com sucesso.`,
+      message: `${result.count} vendas importadas.`,
     };
   },
 
-  // --- IMPORTAÇÃO EM MASSA (FRETES) ---
   async processarFretesEmMassa(planilhaFretes: any[]) {
-    // 1. Normaliza as NFs que vieram da planilha para buscar no banco
     const nfsPlanilha = planilhaFretes
       .filter((item) => item.nf)
       .map((item) => String(item.nf));
+    if (nfsPlanilha.length === 0) return { successCount: 0, errors: [] };
 
-    if (nfsPlanilha.length === 0) {
-      return { successCount: 0, errors: [] };
-    }
-
-    // 2. Busca os registros no banco para ver o que existe e o que já foi pago
     const vendasNoBanco = await prisma.venda.findMany({
       where: { nf: { in: nfsPlanilha } },
-      select: { 
-        id: true, // Trazemos o ID para fazer o update com segurança
-        nf: true, 
-        fretePago: true 
-      },
+      select: { id: true, nf: true, fretePago: true },
     });
 
-    // Cria um mapa (Dicionário) para busca super rápida: { "1234": { id: "...", fretePago: false } }
-    const mapaVendasDb = new Map(
-      vendasNoBanco.map((v) => [v.nf, { id: v.id, fretePago: v.fretePago }])
-    );
-
+    const mapaVendasDb = new Map(vendasNoBanco.map((v) => [v.nf, v]));
     const paraAtualizar = [];
     const errors = [];
 
-    // 3. Classifica os dados da planilha (O que vai atualizar x O que dá erro)
     for (const item of planilhaFretes) {
       const nf = String(item.nf);
       const vendaDb = mapaVendasDb.get(nf);
 
-      // Regra 1: A nota nem existe no banco
       if (!vendaDb) {
-        errors.push({
-          nf: nf,
-          fatura: item.fatura || "",
-          loja: item.loja || "DESCONHECIDA",
-          motivo: "NÃO ENCONTRADO",
-        });
+        errors.push({ nf, motivo: "NÃO ENCONTRADO" });
         continue;
       }
-
-      // Regra 2: A nota existe, mas o frete JÁ FOI PAGO
       if (vendaDb.fretePago) {
-        errors.push({
-          nf: nf,
-          fatura: item.fatura || "",
-          loja: item.loja || "DESCONHECIDA",
-          motivo: "JÁ PAGO",
-        });
+        errors.push({ nf, motivo: "JÁ PAGO" });
         continue;
       }
 
-      // Regra 3: Tudo certo, separa para atualizar
-      paraAtualizar.push({
-        id: vendaDb.id, // Usamos o ID do banco para não dar erro de constraint
-        NumeroFatura: item.fatura || null, // Se vier vazio, salva como null
-      });
+      paraAtualizar.push({ id: vendaDb.id, fatura: item.fatura || null });
     }
 
-    // Se não houver nada válido para atualizar, já retorna os erros
-    if (paraAtualizar.length === 0) {
-      return { successCount: 0, errors };
+    if (paraAtualizar.length > 0) {
+      await prisma.$transaction(
+        paraAtualizar.map((d) =>
+          prisma.venda.update({
+            where: { id: d.id },
+            data: { fretePago: true, NumeroFatura: d.fatura },
+          }),
+        ),
+      );
     }
 
-    // 4. Executa a atualização no banco de dados usando $transaction
-    // O Prisma não tem um updateMany dinâmico (com faturas diferentes pra cada linha), 
-    // então criamos um array de promises e rodamos na transaction.
-    const transacoesUpdate = paraAtualizar.map((dados) =>
-      prisma.venda.update({
-        where: { id: dados.id },
-        data: {
-          fretePago: true, // Muda o status para pago
-          NumeroFatura: dados.NumeroFatura, // Salva a fatura que veio do excel
-        },
-      })
-    );
-
-    await prisma.$transaction(transacoesUpdate);
-
-    // 5. Retorna o formato exato que o Front-end está esperando
-    return {
-      successCount: paraAtualizar.length,
-      errors: errors,
-    };
+    return { successCount: paraAtualizar.length, errors };
   },
 
-  // --- ATUALIZAÇÃO (IMUTABILIDADE) ---
   async update(id: string, data: any) {
     const current = await prisma.venda.findUnique({ where: { id } });
     if (!current) throw new Error("Venda não encontrada");
 
-    // Regra de Imutabilidade das parcelas
     let finalQtd = current.qtdParcelas;
-    const novaQtd = data.qtdParcelas || data.numeroParcelas;
-    if (current.qtdParcelas === null && novaQtd) {
-      finalQtd = Number(novaQtd);
-    }
+    if (current.qtdParcelas === null && data.qtdParcelas)
+      finalQtd = Number(data.qtdParcelas);
 
     const liquido =
-      Number(data.baseIcms || current.baseIcms) -
-      Number(data.comissaoVenda || current.comissaoVenda) -
-      Number(data.comissaoFrete || current.comissaoFrete) -
-      Number(data.desconto || current.desconto);
+      Number(data.baseIcms ?? current.baseIcms) -
+      Number(data.comissaoVenda ?? current.comissaoVenda) -
+      Number(data.comissaoFrete ?? current.comissaoFrete) -
+      Number(data.desconto ?? current.desconto);
 
     return await prisma.venda.update({
       where: { id },
-      data: {
-        ...data,
-        liquidoReceber: liquido,
-        qtdParcelas: finalQtd,
-      },
+      data: { ...data, liquidoReceber: liquido, qtdParcelas: finalQtd },
     });
   },
 

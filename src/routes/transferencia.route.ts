@@ -4,6 +4,26 @@ import { transferenciaService } from '../services/transferencias.service';
 
 export const transferenciaRoutes = Router();
 
+transferenciaRoutes.post('/reembolsos/manual', ensureAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const data = req.body;
+    const result = await transferenciaService.createReembolso(data);
+    return res.status(201).json(result);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+transferenciaRoutes.post('/devolucoes/manual', ensureAuthenticated, async (req: Request, res: Response) => {
+  try {
+    const data = req.body;
+    const result = await transferenciaService.createDevolucao(data);
+    return res.status(201).json(result);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
 transferenciaRoutes.post('/import-reembolsos', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
     const reembolsos = Array.isArray(req.body) ? req.body : req.body.reembolsos;

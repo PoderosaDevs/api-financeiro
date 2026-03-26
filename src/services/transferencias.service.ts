@@ -173,6 +173,55 @@ export const transferenciaService = {
     return { count: processados, skipped: falhasNf };
   },
 
+  async createReembolso(data: any) {
+    const payload = {
+      ...data,
+      nf: data.nf,
+      valor: data.repasse || data.valor,
+      data: data.dataOperacao ? new Date(data.dataOperacao) : new Date(),
+      parcelaPaga: parseInt(String(data.parcelaPaga || 1)),
+    };
+
+    const res = await this.importReembolsos([payload]);
+
+    if (res.skipped.length > 0) {
+      throw new Error(`Venda com NF ${data.nf} não encontrada.`);
+    }
+
+    if (res.duplicates.length > 0) {
+      throw new Error(`A parcela ${payload.parcelaPaga} já possui um reembolso registrado para esta NF.`);
+    }
+
+    return { 
+      message: "Reembolso criado com sucesso", 
+      vendaId: data.vendaId,
+      ...res 
+    };
+  },
+
+  async createDevolucao(data: any) {
+    const payload = {
+      ...data,
+      nf: data.nf,
+      valor: data.valorDevolucao || data.valor,
+      valorBase: data.baseIcms || data.valorBase,
+      data: data.dataOperacao ? new Date(data.dataOperacao) : new Date(),
+      numeroDevolucao: data.numeroDevolucao || `MAN-${Date.now()}`,
+    };
+
+    const res = await this.importDevolucoes([payload]);
+
+    if (res.skipped.length > 0) {
+      throw new Error(`Venda com NF ${data.nf} não encontrada.`);
+    }
+
+    return { 
+      message: "Devolução criada com sucesso", 
+      vendaId: data.vendaId,
+      ...res 
+    };
+  },
+
   async getAllDevolucoes() {
     return await prisma.devolucao.findMany({
       include: { venda: true },
