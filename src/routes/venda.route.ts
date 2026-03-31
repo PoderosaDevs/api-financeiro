@@ -26,12 +26,19 @@ vendaRoutes.get("/", async (req: Request, res: Response) => {
   return res.json(result);
 });
 
-// Resumo de Métricas (Sem Limites de Paginação)
 vendaRoutes.get("/summary", async (req: Request, res: Response) => {
   const dataInicio = req.query.dataInicio as string;
   const dataFim = req.query.dataFim as string;
+  const status = req.query.status as string;
+  const marketplaceId = req.query.marketplaceId as string;
 
-  const summary = await vendaService.getSummary(dataInicio, dataFim);
+  const summary = await vendaService.getSummary(
+    dataInicio,
+    dataFim,
+    status,
+    marketplaceId
+  );
+  
   return res.json(summary);
 });
 

@@ -3,7 +3,7 @@ import { prisma } from "../prisma/client";
 import { getIntervaloDatas } from "../utils/getIntervaloDatas";
 export const vendaService = {
   // --- BUSCAS PAGINADAS ---
- async getAll(
+  async getAll(
     page: number = 1,
     limit: number = 50,
     dataInicio?: string,
@@ -15,8 +15,8 @@ export const vendaService = {
     const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
     // O segredo está no "as VendaStatus[]"
-    const statusArray = status 
-      ? (status.split(",") as VendaStatus[]) 
+    const statusArray = status
+      ? (status.split(",") as VendaStatus[])
       : undefined;
 
     const where: Prisma.VendaWhereInput = {
@@ -52,27 +52,39 @@ export const vendaService = {
 
   // --- SUMÁRIO DE MÉTRICAS (RESOLVE O PROBLEMA DO LIMIT 50) ---
 
-  async getSummary(dataInicio?: string, dataFim?: string) {
+  async getSummary(
+    dataInicio?: string,
+    dataFim?: string,
+    status?: string,
+    marketplaceId?: string,
+  ) {
     const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
-    const where = {
+    const where: any = {
       dataVenda: { gte: inicio, lte: fim },
     };
 
+    if (status) {
+      const statusArray = status.split(",");
+      where.status = { in: statusArray };
+    }
+
+    if (marketplaceId) {
+      where.marketplaceId = marketplaceId;
+    }
+
     const [vendasAgregadas, pagamentosAgregados, totalVendas] =
       await Promise.all([
-        // 1. Agregação de valores das vendas no período
         prisma.venda.aggregate({
           where,
           _sum: {
-            baseIcms: true, // Valor Bruto
+            baseIcms: true,
             comissaoVenda: true,
             comissaoFrete: true,
             frete_e_taxas: true,
             liquidoReceber: true,
           },
         }),
-        // 2. Soma de todos os pagamentos (Dinheiro que efetivamente entrou)
         prisma.pagamento.aggregate({
           where: {
             venda: where,
@@ -81,38 +93,39 @@ export const vendaService = {
             valor: true,
           },
         }),
-        // 3. Contagem total
         prisma.venda.count({ where }),
       ]);
 
-    // --- CÁLCULOS ---
-
-    // 1. Receita Bruta: Soma de toda a Base ICMS do período
     const receitaBruta = Number(vendasAgregadas._sum.baseIcms || 0);
-
-    // 2. Receita Recebida: Total líquido que já caiu na conta (soma da tabela Pagamento)
     const receitaRecebida = Number(pagamentosAgregados._sum.valor || 0);
 
-    // 3. Falta Receber:
-    // É a soma do valor BRUTO das vendas que ainda não foram totalmente pagas.
-    // Buscamos vendas do período onde o status é PENDENTE ou PARCIAL.
+    const statusPendentes = ["PENDENTE"];
+    const wherePendentes = {
+      ...where,
+      status: { in: statusPendentes },
+    };
+
+    if (status) {
+      const statusArray = status.split(",");
+      const intersect = statusArray.filter((s) => statusPendentes.includes(s));
+      wherePendentes.status = {
+        in: intersect.length > 0 ? intersect : ["FORCAR_VAZIO"],
+      };
+    }
+
     const vendasPendentes = await prisma.venda.aggregate({
-      where: {
-        ...where,
-        status: { in: ["PENDENTE"] }, // Ajuste conforme seus enums
-      },
+      where: wherePendentes,
       _sum: {
         baseIcms: true,
       },
     });
+
     const faltaReceber = Number(vendasPendentes._sum.baseIcms || 0);
 
-    // 4. Comissões Descontadas: Total de taxas de venda e frete
     const comissoesDescontadas =
       Number(vendasAgregadas._sum.comissaoVenda || 0) +
       Number(vendasAgregadas._sum.comissaoFrete || 0);
 
-    // 5. Fretes e Tarifas: Soma do campo específico
     const fretesETarifas = Number(vendasAgregadas._sum.frete_e_taxas || 0);
 
     return {
