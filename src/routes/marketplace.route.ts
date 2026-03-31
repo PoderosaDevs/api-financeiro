@@ -1,27 +1,24 @@
-import { Router } from "express";
+import { Router, Request, Response } from "express";
 import * as marketplaceService from "../services/marketplace.service";
 import { ensureAuthenticated } from "../middlewares/auth.middleware";
-import { Request, Response } from "express";
 
 export const marketplaceRoutes = Router();
 
-marketplaceRoutes.get("/", async (req, res) => {
+marketplaceRoutes.get("/", async (req: Request, res: Response) => {
   const marketplaces = await marketplaceService.getAllMarketplaces();
   return res.json(marketplaces);
 });
 
 marketplaceRoutes.get("/:id", async (req: Request, res: Response) => {
   try {
-    const marketplace = await marketplaceService.getMarketplaceById(
-      req.params.id,
-    );
+    const { id } = req.params;
+    const marketplace = await marketplaceService.getMarketplaceById(id as string);
     return res.json(marketplace);
   } catch (error: any) {
     return res.status(404).json({ message: error.message });
   }
 });
 
-// No seu back-end (marketplaceRoutes.post)
 marketplaceRoutes.post(
   "/",
   ensureAuthenticated,
@@ -29,21 +26,15 @@ marketplaceRoutes.post(
     try {
       const { titulo, freteParte } = req.body;
 
-      // Log para conferir se os dados chegam no back
-      console.log("Dados recebidos no Back:", { titulo, freteParte });
-
       const marketplace = await marketplaceService.createMarketplace(
         titulo,
         freteParte,
       );
       return res.status(201).json(marketplace);
     } catch (error: any) {
-      // Isso vai imprimir o erro real no seu terminal (console do VS Code)
-      console.error("ERRO NO PRISMA:", error);
-
       return res.status(500).json({
         error: "Erro interno",
-        message: error.message, // Retorna a mensagem para o front-end ver
+        message: error.message,
       });
     }
   },
@@ -54,10 +45,13 @@ marketplaceRoutes.put(
   ensureAuthenticated,
   async (req: Request, res: Response) => {
     try {
+      const { id } = req.params;
+      const { titulo, freteParte } = req.body;
+
       const updated = await marketplaceService.updateMarketplace(
-        req.params.id,
-        req.body.titulo,
-        req.body.freteParte
+        id as string,
+        titulo,
+        freteParte
       );
       return res.json(updated);
     } catch (error: any) {
@@ -71,7 +65,8 @@ marketplaceRoutes.delete(
   ensureAuthenticated,
   async (req: Request, res: Response) => {
     try {
-      await marketplaceService.deleteMarketplace(req.params.id);
+      const { id } = req.params;
+      await marketplaceService.deleteMarketplace(id as string);
       return res.status(204).send();
     } catch (error: any) {
       return res.status(400).json({ message: error.message });
