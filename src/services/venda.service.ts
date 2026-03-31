@@ -1,3 +1,4 @@
+
 import { VendaStatus, Prisma } from "@prisma/client";
 import { prisma } from "../prisma/client";
 import { getIntervaloDatas } from "../utils/getIntervaloDatas";

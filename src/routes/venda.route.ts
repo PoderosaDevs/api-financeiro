@@ -1,3 +1,4 @@
+
 import { Router } from "express";
 import { vendaService } from "../services/venda.service";
 import { ensureAuthenticated } from "../middlewares/auth.middleware";
