@@ -65,7 +65,8 @@ transferenciaRoutes.get('/devolucoes', ensureAuthenticated, async (req: Request,
 
 transferenciaRoutes.get('/devolucoes/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
-    const result = await transferenciaService.getDevolucaoById(req.params.id);
+    const { id } = req.params;
+    const result = await transferenciaService.getDevolucaoById(id as string);
     if (!result) return res.status(404).json({ message: "Devolução não encontrada." });
     return res.json(result);
   } catch (error: any) {
@@ -75,7 +76,8 @@ transferenciaRoutes.get('/devolucoes/:id', ensureAuthenticated, async (req: Requ
 
 transferenciaRoutes.put('/devolucoes/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
-    const result = await transferenciaService.updateDevolucao(req.params.id, req.body);
+    const { id } = req.params;
+    const result = await transferenciaService.updateDevolucao(id as string, req.body);
     return res.json(result);
   } catch (error: any) {
     return res.status(400).json({ message: error.message });
@@ -84,7 +86,8 @@ transferenciaRoutes.put('/devolucoes/:id', ensureAuthenticated, async (req: Requ
 
 transferenciaRoutes.delete('/devolucoes/:id', ensureAuthenticated, async (req: Request, res: Response) => {
   try {
-    await transferenciaService.deleteDevolucao(req.params.id);
+    const { id } = req.params;
+    await transferenciaService.deleteDevolucao(id as string);
     return res.status(204).send();
   } catch (error: any) {
     return res.status(400).json({ message: error.message });
