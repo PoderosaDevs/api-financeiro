@@ -11,20 +11,29 @@ export const vendaService = {
     dataFim?: string,
     status?: string,
     marketplaceId?: string,
+    search?: string
   ) {
     const skip = (page - 1) * limit;
-    const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
-    // O segredo está no "as VendaStatus[]"
-    const statusArray = status
-      ? (status.split(",") as VendaStatus[])
-      : undefined;
+    let where: Prisma.VendaWhereInput = {};
 
-    const where: Prisma.VendaWhereInput = {
-      dataVenda: { gte: inicio, lte: fim },
-      ...(statusArray && { status: { in: statusArray } }),
-      ...(marketplaceId && { marketplaceId }),
-    };
+    if (search && search.trim() !== "") {
+      where = {
+        OR: [
+          { nf: { contains: search.trim() } },
+          { loja: { contains: search.trim(), mode: 'insensitive' } }
+        ]
+      };
+    } else {
+      const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
+      const statusArray = status ? (status.split(",") as VendaStatus[]) : undefined;
+
+      where = {
+        dataVenda: { gte: inicio, lte: fim },
+        ...(statusArray && { status: { in: statusArray } }),
+        ...(marketplaceId && { marketplaceId }),
+      };
+    }
 
     const [vendas, total] = await Promise.all([
       prisma.venda.findMany({
@@ -137,6 +146,36 @@ export const vendaService = {
       comissoesDescontadas: Number(comissoesDescontadas.toFixed(2)),
       fretesETarifas: Number(fretesETarifas.toFixed(2)),
     };
+  },
+
+  // --- VERIFICAÇÃO DE DUPLICIDADE (PRÉ-IMPORTAÇÃO) ---
+  async verifyDuplicity(sales: any[]) {
+    const results = await Promise.all(
+      sales.map(async (sale) => {
+        const nfRef = sale.nf || sale.nfVenda;
+
+        if (!nfRef) {
+          return {
+            ...sale,
+            status: "error",
+            motivo: "NF não informada",
+          };
+        }
+
+        const existingVenda = await prisma.venda.findFirst({
+          where: { nf: String(nfRef) },
+          include: { marketplace: true }
+        });
+
+        return {
+          ...sale,
+          status: existingVenda ? "exists" : "not_found",
+          dadosOriginais: existingVenda || null,
+        };
+      })
+    );
+
+    return results;
   },
 
   // --- EXPORTAÇÃO COM FILTROS AVANÇADOS ---

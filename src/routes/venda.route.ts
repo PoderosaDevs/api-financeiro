@@ -11,6 +11,7 @@ vendaRoutes.get("/", async (req: Request, res: Response) => {
   const dataFim = req.query.dataFim as string;
   const status = req.query.status as string;
   const marketplaceId = req.query.marketplaceId as string;
+  const search = req.query.search as string;
 
   const result = await vendaService.getAll(
     page,
@@ -18,7 +19,8 @@ vendaRoutes.get("/", async (req: Request, res: Response) => {
     dataInicio,
     dataFim,
     status,
-    marketplaceId
+    marketplaceId,
+    search
   );
   
   return res.json(result);
@@ -125,6 +127,29 @@ vendaRoutes.post(
       return res
         .status(400)
         .json({ message: error.message || "Erro ao importar vendas" });
+    }
+  },
+);
+
+vendaRoutes.post(
+  "/verify",
+  ensureAuthenticated,
+  async (req: Request, res: Response) => {
+    try {
+      const sales = Array.isArray(req.body) ? req.body : req.body.sales;
+
+      if (!Array.isArray(sales)) {
+        return res
+          .status(400)
+          .json({ message: "Formato inválido. Esperado um array de vendas." });
+      }
+
+      const result = await vendaService.verifyDuplicity(sales);
+      return res.status(200).json(result);
+    } catch (error: any) {
+      return res
+        .status(500)
+        .json({ message: error.message || "Erro ao verificar duplicidade" });
     }
   },
 );
