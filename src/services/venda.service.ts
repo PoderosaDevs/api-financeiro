@@ -1,7 +1,9 @@
 
-import { VendaStatus, Prisma } from "@prisma/client";
-import { prisma } from "../prisma/client";
+import { Prisma, VendaStatus } from "../generated/prisma";
 import { getIntervaloDatas } from "../utils/getIntervaloDatas";
+
+import { prisma } from '../prisma/client'
+
 export const vendaService = {
   // --- BUSCAS PAGINADAS ---
   async getAll(
@@ -70,12 +72,12 @@ export const vendaService = {
   ) {
     const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
-    const where: any = {
+    const where: Prisma.VendaWhereInput = {
       dataVenda: { gte: inicio, lte: fim },
     };
 
     if (status) {
-      const statusArray = status.split(",");
+      const statusArray = status.split(",") as VendaStatus[];
       where.status = { in: statusArray };
     }
 
@@ -109,19 +111,21 @@ export const vendaService = {
     const receitaBruta = Number(vendasAgregadas._sum.baseIcms || 0);
     const receitaRecebida = Number(pagamentosAgregados._sum.valor || 0);
 
-    const statusPendentes = ["PENDENTE"];
-    const wherePendentes = {
-      ...where,
-      status: { in: statusPendentes },
-    };
+    const statusPendentesPermitidos: VendaStatus[] = ["PENDENTE"];
+
+    let filtroStatusPendentes: VendaStatus[] = statusPendentesPermitidos;
 
     if (status) {
-      const statusArray = status.split(",");
-      const intersect = statusArray.filter((s) => statusPendentes.includes(s));
-      wherePendentes.status = {
-        in: intersect.length > 0 ? intersect : ["FORCAR_VAZIO"],
-      };
+      const statusSolicitados = status.split(",") as VendaStatus[];
+      filtroStatusPendentes = statusSolicitados.filter((s) =>
+        statusPendentesPermitidos.includes(s)
+      );
     }
+
+    const wherePendentes: Prisma.VendaWhereInput = {
+      ...where,
+      status: { in: filtroStatusPendentes },
+    };
 
     const vendasPendentes = await prisma.venda.aggregate({
       where: wherePendentes,

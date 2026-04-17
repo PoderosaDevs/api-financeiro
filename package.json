@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "license": "MIT",
   "dependencies": {
-    "@prisma/client": "5.10.2",
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
     "@types/bcrypt": "^6.0.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
@@ -13,18 +14,22 @@
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "date-fns": "^4.1.0",
-    "dotenv": "^17.2.3",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "pg": "^8.20.0",
+    "xlsx": "^0.18.5",
     "zod": "^4.3.5"
   },
   "devDependencies": {
-    "prisma": "5.10.2",
+    "@types/pg": "^8.20.0",
+    "prisma": "^7.7.0",
     "ts-node-dev": "^2.0.0",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "ts-node-dev --respawn --files src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",

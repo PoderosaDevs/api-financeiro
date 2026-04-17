@@ -1,9 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-
+    "module": "CommonJS",
+    "moduleResolution": "bundler",
+    "ignoreDeprecations": "6.0",
+    
     "rootDir": "src",
     "outDir": "dist",
 
@@ -12,7 +13,10 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
 
-    "baseUrl": "./",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    },
 
     "types": ["node"],
     "typeRoots": ["./node_modules/@types"]

@@ -45,177 +45,99 @@ export const pagamentoService = {
    */
   async importBulk(pagamentos: any[]) {
     const totalInicial = pagamentos.length;
-    console.log(
-      `\n🚀 [IMPORT] Iniciando auditoria e processamento de ${totalInicial} pagamentos...`,
-    );
+    console.log(`\n🚀 [CLEAN IMPORT] Reconstruindo financeiro com comissões...`);
 
-    let processados = 0;
-    const falhasNf: string[] = [];
-    const duplicados: string[] = [];
-    const errosValidacao: string[] = []; // Novo array para erros de conta (R$ não bate)
-
-    // ------------------------------------------------------------------
-    // PASSO 1: OTIMIZAÇÃO DE BUSCA
-    // ------------------------------------------------------------------
     const nfsNaPlanilha = pagamentos
-      .map((p) => String(p.nota || p.nf || p.nfVenda))
+      .map((p) => String(p.nota || p.nf || p.nfVenda).trim())
       .filter((nf) => nf && nf !== "undefined");
 
-    console.log(`🔍 [STEP 1] Buscando dados no banco...`);
+    const vendasNoBanco = await prisma.venda.findMany({
+      where: { nf: { in: nfsNaPlanilha } },
+      select: { id: true, nf: true, liquidoReceber: true, baseIcms: true, loja: true },
+    });
 
-    const [vendasNoBanco, pagamentosExistentes] = await Promise.all([
-      prisma.venda.findMany({
-        where: { nf: { in: nfsNaPlanilha } },
-        // Precisamos trazer o ID e o Status atual
-        select: {
-          id: true,
-          nf: true,
-          qtdParcelas: true,
-          status: true,
-          baseIcms: true,
-        },
-      }),
-      prisma.pagamento.findMany({
-        where: { nfVenda: { in: nfsNaPlanilha } },
-        select: { vendaId: true, numeroParcela: true },
-      }),
-    ]);
-
-    const updatesVendas: any[] = [];
+    const updatesVendas = new Map<string, any>();
     const novosPagamentos: any[] = [];
-
-    // ------------------------------------------------------------------
-    // PASSO 2: PROCESSAMENTO E VALIDAÇÃO MATEMÁTICA
-    // ------------------------------------------------------------------
+    const idsVendasParaLimpar = new Set<string>();
 
     pagamentos.forEach((pgto) => {
-      // 1. Normalização de Dados
-      const nfRef = String(pgto.nota || pgto.nf).trim();
+      const nfRef = String(pgto.nota || pgto.nf || pgto.nfVenda).trim();
+      const nParcela = parseInt(String(pgto.parcelaPaga || pgto.numeroParcela || 1));
+      const totalParcelasInput = parseInt(String(pgto.parcelas || pgto.qtdParcelas || 1));
 
-      const nParcela = parseInt(
-        String(pgto.parcelaPaga || pgto.numeroParcela || 1),
-      );
-      const totalParcelasInput = parseInt(
-        String(pgto.parcelas || pgto.qtdParcelas || 1),
-      );
+      const valorRaw = String(pgto.repasse || pgto.valor || 0).replace(',', '.');
+      const valorRepasse = Math.round(parseFloat(valorRaw) * 100) / 100;
 
-      // Valores Financeiros (Tratamento para garantir float)
-      const valorRepasse = parseFloat(String(pgto.repasse || pgto.valor || 0)); // Líquido que entrou
-      const valComissaoVenda = parseFloat(String(pgto.comissaoVenda || 0));
-      const valComissaoFrete = parseFloat(String(pgto.comissaoFrete || 0));
-      const valFreteTaxas = parseFloat(String(pgto.frete_e_taxas || 0));
-      const baseIcmsPlanilha = parseFloat(String(pgto.baseIcms || 0)); // Bruto esperado
+      // Campos de Comissão e Taxas
+      const valComissaoVenda = parseFloat(String(pgto.comissaoVenda || 0).replace(',', '.'));
+      const valComissaoFrete = parseFloat(String(pgto.comissaoFrete || 0).replace(',', '.'));
+      const valFreteTaxas = parseFloat(String(pgto.frete_e_taxas || 0).replace(',', '.'));
+      const baseIcmsPlanilha = parseFloat(String(pgto.baseIcms || 0).replace(',', '.'));
 
-      // 2. Validação: Venda existe?
       const venda = vendasNoBanco.find((v) => v.nf === nfRef);
-      if (!venda) {
-        falhasNf.push(nfRef);
-        return;
-      }
+      if (!venda) return;
 
-      // 3. Validação: Duplicidade
-      const jaExiste = pagamentosExistentes.some(
-        (p) => p.vendaId === venda.id && p.numeroParcela === nParcela,
-      );
-      if (jaExiste) {
-        duplicados.push(`NF ${nfRef} (Parc. ${nParcela})`);
-        return;
-      }
+      idsVendasParaLimpar.add(venda.id);
 
-      // 4. A "Prova Real" (Validação Financeira)
-      // Regra: Repasse + Comissões deve ser igual a Base ICMS (com margem de erro de centavos)
-      const somaCalculada = valorRepasse + valComissaoVenda + valComissaoFrete + valFreteTaxas;
-      const diferenca = Math.abs(somaCalculada - baseIcmsPlanilha);
+      // Cálculo da comissão retida (Soma das comissões e taxas)
+      const comissaoTotal = Math.round((valComissaoVenda + valComissaoFrete + valFreteTaxas) * 100) / 100;
 
-      // Aceita erro de até R$ 0.10 por arredondamento
-      if (diferenca > 0.1 && baseIcmsPlanilha > 0) {
-        // Se a conta não fecha, podemos logar um aviso ou impedir (depende da sua regra).
-        // Aqui vou logar apenas, mas processar o pagamento.
-        console.warn(
-          `⚠️ [ALERTA FINANCEIRO] NF ${nfRef}: Conta não fecha! Repasse(${valorRepasse}) + Comissões(${valComissaoVenda}+${valComissaoFrete}) + Frete e Taxas(${valFreteTaxas}) != Base(${baseIcmsPlanilha})`,
-        );
-      }
-
-      // 5. Lógica de Status e Atualização da Venda
-      let novoStatus = venda.status;
-
-      // Se for a última parcela, consideramos PAGO.
-      // Se for menor que o total, é PARCIALMENTE_PAGO.
-      if (nParcela >= totalParcelasInput) {
-        novoStatus = "PAGO";
-      } else {
-        novoStatus = "PARCIALMENTE_PAGO";
-      }
-
-      // Preparar atualização da Venda (Enriquece com dados financeiros do Marketplace)
-      // ATENÇÃO: Só atualizamos os dados financeiros da Venda se os dados vierem preenchidos
-      const dadosUpdateVenda: any = {
-        status: novoStatus,
-        // Se o excel informou parcelas, atualizamos
-        qtdParcelas:
-          totalParcelasInput > 0 ? totalParcelasInput : venda.qtdParcelas,
-      };
-
-      // Se a planilha trouxer comissões, atualizamos a venda para refletir o custo real
-      // Calculamos o líquido a receber PROJETADO para a venda total
-      if (valComissaoVenda > 0 || valComissaoFrete > 0) {
-        dadosUpdateVenda.comissaoVenda = valComissaoVenda;
-        dadosUpdateVenda.comissaoFrete = valComissaoFrete;
-        dadosUpdateVenda.frete_e_taxas = valFreteTaxas;
-
-        // Líquido Receber = Base ICMS (do banco ou planilha) - Comissões
-        const baseCalculo =
-          Number(venda.baseIcms) > 0
-            ? Number(venda.baseIcms)
-            : baseIcmsPlanilha;
-        dadosUpdateVenda.liquidoReceber =
-          baseCalculo - (valComissaoVenda + valComissaoFrete + valFreteTaxas);
-      }
-
-      updatesVendas.push(
-        prisma.venda.update({
-          where: { id: venda.id },
-          data: dadosUpdateVenda,
-        }),
-      );
-
-      // 6. Criar o Pagamento
       novosPagamentos.push({
         vendaId: venda.id,
         nfVenda: nfRef,
         numeroParcela: nParcela,
-        valor: valorRepasse, // Salva o Líquido (Repasse)
-        data: new Date(), // Ou pgto.data se tiver na planilha
-        // Se adicionou o campo opcional sugerido:
-        // comissaoRetida: valComissaoVenda + valComissaoFrete
+        valor: valorRepasse,
+        data: pgto.data ? new Date(pgto.data) : new Date(),
+        comissaoRetida: comissaoTotal > 0 ? comissaoTotal : null,
+        loja: pgto.loja || venda.loja
       });
 
-      processados++;
+      const totalSendoInserido = novosPagamentos
+        .filter(p => p.vendaId === venda.id)
+        .reduce((acc, p) => acc + p.valor, 0);
+
+      // Atualização dos dados da venda (Cabeçalho)
+      const dadosUpdateVenda: any = {
+        qtdParcelas: totalParcelasInput,
+        status: totalSendoInserido >= (Number(venda.liquidoReceber) - 0.1) ? "PAGO" : "PARCIALMENTE_PAGO"
+      };
+
+      // Se a planilha trouxer dados financeiros, atualizamos a base da venda
+      if (valComissaoVenda > 0 || valFreteTaxas > 0) {
+        const baseCalculo = Number(venda.baseIcms) > 0 ? Number(venda.baseIcms) : baseIcmsPlanilha;
+        dadosUpdateVenda.comissaoVenda = valComissaoVenda;
+        dadosUpdateVenda.frete_e_taxas = valFreteTaxas;
+        dadosUpdateVenda.liquidoReceber = baseCalculo - comissaoTotal;
+      }
+
+      updatesVendas.set(venda.id, {
+        where: { id: venda.id },
+        data: dadosUpdateVenda,
+      });
     });
 
-    // ------------------------------------------------------------------
-    // PASSO 3: PERSISTÊNCIA
-    // ------------------------------------------------------------------
+    if (idsVendasParaLimpar.size > 0) {
+      await prisma.$transaction(async (tx) => {
+        await tx.pagamento.deleteMany({
+          where: { vendaId: { in: Array.from(idsVendasParaLimpar) } }
+        });
 
-    if (novosPagamentos.length > 0 || updatesVendas.length > 0) {
-      console.log(
-        `💾 [STEP 3] Gravando ${novosPagamentos.length} pagamentos e atualizando vendas...`,
-      );
+        for (const u of updatesVendas.values()) {
+          await tx.venda.update(u);
+        }
 
-      await prisma.$transaction([
-        ...updatesVendas,
-        prisma.pagamento.createMany({
-          data: novosPagamentos,
-          skipDuplicates: true,
-        }),
-      ]);
+        if (novosPagamentos.length > 0) {
+          await tx.pagamento.createMany({
+            data: novosPagamentos
+          });
+        }
+      }, { timeout: 60000 });
     }
 
     return {
-      message: `${processados} pagamentos processados.`,
-      count: processados,
-      skipped: falhasNf,
-      duplicates: duplicados,
+      status: "success",
+      vendasProcessadas: idsVendasParaLimpar.size,
+      pagamentosCriados: novosPagamentos.length
     };
   },
 
@@ -230,3 +152,4 @@ export const pagamentoService = {
     return await prisma.pagamento.delete({ where: { id } });
   },
 };
+

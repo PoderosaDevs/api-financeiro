@@ -1,5 +1,5 @@
+import { VendaStatus } from "../generated/prisma";
 import { prisma } from "../prisma/client";
-import { VendaStatus } from "@prisma/client";
 
 export const transferenciaService = {
   async importReembolsos(reembolsos: any[]) {
