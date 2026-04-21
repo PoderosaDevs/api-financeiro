@@ -1,144 +1,217 @@
 import { prisma } from "../prisma/client";
-import { vendaService } from "./venda.service";
+import { VendaStatus, Pagamento, Prisma } from "../generated/prisma";
+
+/**
+ * Interface para garantir tipagem na entrada de dados (Unitário e Bulk)
+ */
+interface PagamentoInput {
+  nota?: string;
+  nf?: string;
+  nfVenda?: string;
+  parcelaPaga?: string | number;
+  numeroParcela?: string | number;
+  valor?: string | number;
+  repasse?: string | number;
+  comissaoVenda?: string | number;
+  comissaoFrete?: string | number;
+  frete_e_taxas?: string | number;
+  data?: string | Date;
+  loja?: string;
+}
 
 export const pagamentoService = {
-  // --- CRIAÇÃO UNITÁRIA (Manual) ---
-  async create(data: any) {
-    const nfRef = data.nfVenda || data.nf;
-    if (!nfRef) throw new Error("A NF da venda é obrigatória.");
 
-    const venda = await prisma.venda.findUnique({
-      where: { nf: String(nfRef) },
+  /**
+   * 1. VERIFY (Apuração Geral e Higienização)
+   * Varre vendas ativas para remover duplicatas e recalcular status.
+   */
+  async verify(): Promise<{
+    processadas: number;
+    corrigidas: number;
+    duplicidadesRemovidas: number;
+    detalhes: string[]
+  }> {
+    console.log("🔍 Iniciando Higienização e Apuração Financeira (Processamento em Lotes)...");
+
+    let processadas = 0;
+    let corrigidas = 0;
+    let duplicidadesRemovidas = 0;
+    const detalhes: string[] = [];
+
+    const TAMANHO_LOTE = 2000; // Processamos 2000 vendas por vez para não estourar a memória
+    let skip = 0;
+    let continuar = true;
+
+    while (continuar) {
+      // Buscamos um lote de vendas
+      const vendas = await prisma.venda.findMany({
+        where: { status: { notIn: [VendaStatus.CANCELADO, VendaStatus.FINALIZADO] } },
+        include: { pagamentos: { orderBy: { data: 'desc' } } },
+        take: TAMANHO_LOTE,
+        skip: skip,
+      });
+
+      if (vendas.length === 0) {
+        continuar = false;
+        break;
+      }
+
+      for (const venda of vendas) {
+        processadas++;
+
+        // --- LOGICA DE DUPLICIDADE ---
+        const parcelasUnicas = new Map<number, string>();
+        const idsParaDeletar: string[] = [];
+
+        for (const pgto of venda.pagamentos) {
+          const nParcela = pgto.numeroParcela || 1;
+          if (parcelasUnicas.has(nParcela)) {
+            idsParaDeletar.push(pgto.id);
+          } else {
+            parcelasUnicas.set(nParcela, pgto.id);
+          }
+        }
+
+        if (idsParaDeletar.length > 0) {
+          await prisma.pagamento.deleteMany({ where: { id: { in: idsParaDeletar } } });
+          duplicidadesRemovidas += idsParaDeletar.length;
+          venda.pagamentos = venda.pagamentos.filter(p => !idsParaDeletar.includes(p.id));
+        }
+
+        // --- LOGICA DE STATUS ---
+        const somaLiquido = venda.pagamentos.reduce((acc: number, p: Pagamento) => acc + Number(p.valor), 0);
+        const somaTaxas = venda.pagamentos.reduce((acc: number, p: Pagamento) => acc + Number(p.comissaoRetida || 0), 0);
+        const totalRecebido = somaLiquido + somaTaxas;
+        const valorMeta = Number(venda.baseIcms);
+
+        let novoStatus: VendaStatus = VendaStatus.PENDENTE;
+        if (totalRecebido >= (valorMeta - 0.1)) {
+          novoStatus = VendaStatus.PAGO;
+        } else if (totalRecebido > 0) {
+          novoStatus = VendaStatus.PARCIALMENTE_PAGO;
+        }
+
+        if (venda.status !== novoStatus) {
+          await prisma.venda.update({
+            where: { id: venda.id },
+            data: { status: novoStatus }
+          });
+          detalhes.push(`NF: ${venda.nf} | ${venda.status} -> ${novoStatus}`);
+          corrigidas++;
+        }
+      }
+
+      console.log(`⏳ Processadas ${processadas} vendas...`);
+      skip += TAMANHO_LOTE;
+    }
+
+    return { processadas, corrigidas, duplicidadesRemovidas, detalhes };
+  },
+
+  /**
+   * 2. CRIAÇÃO UNITÁRIA
+   * Aplica Upsert manual para evitar duplicatas em inserções avulsas.
+   */
+  async create(data: PagamentoInput): Promise<Pagamento> {
+    const nfRef = String(data.nfVenda || data.nf);
+    if (!nfRef) throw new Error("NF de venda é obrigatória.");
+
+    const venda = await prisma.venda.findUnique({ where: { nf: nfRef } });
+    if (!venda) throw new Error(`Venda NF ${nfRef} não encontrada.`);
+
+    const nParcela = Number(data.numeroParcela || data.parcelaPaga || 1);
+    const valorRepasse = Number(data.valor || data.repasse || 0);
+    const comissaoTotal = Number(data.comissaoVenda || 0) + Number(data.comissaoFrete || 0) + Number(data.frete_e_taxas || 0);
+
+    const existente = await prisma.pagamento.findFirst({
+      where: { vendaId: venda.id, numeroParcela: nParcela }
     });
-    if (!venda) throw new Error(`Venda com NF ${nfRef} não encontrada.`);
 
-    // 1. Lógica de Sincronização: numeroParcelas (input) -> qtdParcelas (venda)
-    const totalParcelasInput = data.numeroParcelas || data.qtdParcelas;
-    if (venda.qtdParcelas === null && totalParcelasInput) {
-      await vendaService.update(venda.id, {
-        qtdParcelas: Number(totalParcelasInput),
+    if (existente) {
+      return await prisma.pagamento.update({
+        where: { id: existente.id },
+        data: {
+          valor: valorRepasse,
+          comissaoRetida: comissaoTotal,
+          data: data.data ? new Date(data.data) : new Date()
+        }
       });
     }
 
-    // 2. Lógica de Campo: parcelaPaga (input) -> numeroParcela (pagamento)
-    const nParcela = Number(data.parcelaPaga || data.numeroParcela || 1);
-
-    const duplicado = await prisma.pagamento.findFirst({
-      where: { vendaId: venda.id, numeroParcela: nParcela },
-    });
-    if (duplicado)
-      throw new Error(`A parcela ${nParcela} da NF ${nfRef} já está paga.`);
-
     return await prisma.pagamento.create({
       data: {
-        valor: Number(data.valor),
-        data: new Date(data.data),
-        nfVenda: String(nfRef),
+        valor: valorRepasse,
+        comissaoRetida: comissaoTotal,
+        data: data.data ? new Date(data.data) : new Date(),
+        nfVenda: nfRef,
         vendaId: venda.id,
         numeroParcela: nParcela,
-      },
+        loja: data.loja || venda.loja
+      }
     });
   },
 
   /**
-   * Processa a importação e realiza a "Prova Real" dos valores.
+   * 3. IMPORTAÇÃO EM MASSA (Bulk)
    */
-  async importBulk(pagamentos: any[]) {
-    const totalInicial = pagamentos.length;
-    console.log(`\n🚀 [CLEAN IMPORT] Reconstruindo financeiro com comissões...`);
+  async importBulk(pagamentos: PagamentoInput[]): Promise<{ criados: number; atualizados: number }> {
+    let criados = 0;
+    let atualizados = 0;
 
-    const nfsNaPlanilha = pagamentos
-      .map((p) => String(p.nota || p.nf || p.nfVenda).trim())
-      .filter((nf) => nf && nf !== "undefined");
+    const parseMoney = (val: string | number | undefined) => {
+      if (!val) return 0;
+      if (typeof val === 'number') return val;
+      return parseFloat(val.replace('.', '').replace(',', '.')) || 0;
+    };
 
-    const vendasNoBanco = await prisma.venda.findMany({
-      where: { nf: { in: nfsNaPlanilha } },
-      select: { id: true, nf: true, liquidoReceber: true, baseIcms: true, loja: true },
-    });
+    await prisma.$transaction(async (tx) => {
+      for (const pgto of pagamentos) {
+        const nfRef = String(pgto.nota || pgto.nf || pgto.nfVenda).trim();
+        if (!nfRef || nfRef === "undefined") continue;
 
-    const updatesVendas = new Map<string, any>();
-    const novosPagamentos: any[] = [];
-    const idsVendasParaLimpar = new Set<string>();
-
-    pagamentos.forEach((pgto) => {
-      const nfRef = String(pgto.nota || pgto.nf || pgto.nfVenda).trim();
-      const nParcela = parseInt(String(pgto.parcelaPaga || pgto.numeroParcela || 1));
-      const totalParcelasInput = parseInt(String(pgto.parcelas || pgto.qtdParcelas || 1));
-
-      const valorRaw = String(pgto.repasse || pgto.valor || 0).replace(',', '.');
-      const valorRepasse = Math.round(parseFloat(valorRaw) * 100) / 100;
-
-      // Campos de Comissão e Taxas
-      const valComissaoVenda = parseFloat(String(pgto.comissaoVenda || 0).replace(',', '.'));
-      const valComissaoFrete = parseFloat(String(pgto.comissaoFrete || 0).replace(',', '.'));
-      const valFreteTaxas = parseFloat(String(pgto.frete_e_taxas || 0).replace(',', '.'));
-      const baseIcmsPlanilha = parseFloat(String(pgto.baseIcms || 0).replace(',', '.'));
-
-      const venda = vendasNoBanco.find((v) => v.nf === nfRef);
-      if (!venda) return;
-
-      idsVendasParaLimpar.add(venda.id);
-
-      // Cálculo da comissão retida (Soma das comissões e taxas)
-      const comissaoTotal = Math.round((valComissaoVenda + valComissaoFrete + valFreteTaxas) * 100) / 100;
-
-      novosPagamentos.push({
-        vendaId: venda.id,
-        nfVenda: nfRef,
-        numeroParcela: nParcela,
-        valor: valorRepasse,
-        data: pgto.data ? new Date(pgto.data) : new Date(),
-        comissaoRetida: comissaoTotal > 0 ? comissaoTotal : null,
-        loja: pgto.loja || venda.loja
-      });
-
-      const totalSendoInserido = novosPagamentos
-        .filter(p => p.vendaId === venda.id)
-        .reduce((acc, p) => acc + p.valor, 0);
-
-      // Atualização dos dados da venda (Cabeçalho)
-      const dadosUpdateVenda: any = {
-        qtdParcelas: totalParcelasInput,
-        status: totalSendoInserido >= (Number(venda.liquidoReceber) - 0.1) ? "PAGO" : "PARCIALMENTE_PAGO"
-      };
-
-      // Se a planilha trouxer dados financeiros, atualizamos a base da venda
-      if (valComissaoVenda > 0 || valFreteTaxas > 0) {
-        const baseCalculo = Number(venda.baseIcms) > 0 ? Number(venda.baseIcms) : baseIcmsPlanilha;
-        dadosUpdateVenda.comissaoVenda = valComissaoVenda;
-        dadosUpdateVenda.frete_e_taxas = valFreteTaxas;
-        dadosUpdateVenda.liquidoReceber = baseCalculo - comissaoTotal;
-      }
-
-      updatesVendas.set(venda.id, {
-        where: { id: venda.id },
-        data: dadosUpdateVenda,
-      });
-    });
-
-    if (idsVendasParaLimpar.size > 0) {
-      await prisma.$transaction(async (tx) => {
-        await tx.pagamento.deleteMany({
-          where: { vendaId: { in: Array.from(idsVendasParaLimpar) } }
+        const venda = await tx.venda.findUnique({
+          where: { nf: nfRef },
+          select: { id: true, loja: true }
         });
 
-        for (const u of updatesVendas.values()) {
-          await tx.venda.update(u);
-        }
+        if (!venda) continue;
 
-        if (novosPagamentos.length > 0) {
-          await tx.pagamento.createMany({
-            data: novosPagamentos
+        const nParcela = parseInt(String(pgto.parcelaPaga || pgto.numeroParcela || 1));
+        const valorRepasse = parseMoney(pgto.repasse || pgto.valor);
+        const comissaoTotal = parseMoney(pgto.comissaoVenda) + parseMoney(pgto.comissaoFrete) + parseMoney(pgto.frete_e_taxas);
+
+        const existente = await tx.pagamento.findFirst({
+          where: { vendaId: venda.id, numeroParcela: nParcela }
+        });
+
+        if (existente) {
+          await tx.pagamento.update({
+            where: { id: existente.id },
+            data: {
+              valor: valorRepasse,
+              comissaoRetida: comissaoTotal,
+              data: pgto.data ? new Date(pgto.data) : new Date()
+            }
           });
+          atualizados++;
+        } else {
+          await tx.pagamento.create({
+            data: {
+              vendaId: venda.id,
+              nfVenda: nfRef,
+              numeroParcela: nParcela,
+              valor: valorRepasse,
+              comissaoRetida: comissaoTotal,
+              data: pgto.data ? new Date(pgto.data) : new Date(),
+              loja: pgto.loja || venda.loja
+            }
+          });
+          criados++;
         }
-      }, { timeout: 60000 });
-    }
+      }
+    }, { timeout: 300000 });
 
-    return {
-      status: "success",
-      vendasProcessadas: idsVendasParaLimpar.size,
-      pagamentosCriados: novosPagamentos.length
-    };
+    return { criados, atualizados };
   },
 
   async getAll() {
@@ -152,4 +225,3 @@ export const pagamentoService = {
     return await prisma.pagamento.delete({ where: { id } });
   },
 };
-
