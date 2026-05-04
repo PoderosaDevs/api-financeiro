@@ -19,6 +19,18 @@ interface PagamentoInput {
   loja?: string;
 }
 
+const parseToNumber = (val: string | number | undefined): number => {
+  if (val === undefined || val === null || val === "") return 0;
+  if (typeof val === 'number') return val;
+  const normalized = val.replace(/\./g, '').replace(',', '.');
+  return parseFloat(normalized) || 0;
+};
+
+const getNF = (data: PagamentoInput): string => {
+  const nf = String(data.nfVenda || data.nf || data.nota || "").trim();
+  return nf === "undefined" || nf === "" ? "" : nf;
+};
+
 export const pagamentoService = {
 
   /**
@@ -113,16 +125,20 @@ export const pagamentoService = {
    * Aplica Upsert manual para evitar duplicatas em inserções avulsas.
    */
   async create(data: PagamentoInput): Promise<Pagamento> {
-    const nfRef = String(data.nfVenda || data.nf);
+    const nfRef = getNF(data);
     if (!nfRef) throw new Error("NF de venda é obrigatória.");
 
     const venda = await prisma.venda.findUnique({ where: { nf: nfRef } });
     if (!venda) throw new Error(`Venda NF ${nfRef} não encontrada.`);
 
-    const nParcela = Number(data.numeroParcela || data.parcelaPaga || 1);
-    const valorRepasse = Number(data.valor || data.repasse || 0);
-    const comissaoTotal = Number(data.comissaoVenda || 0) + Number(data.comissaoFrete || 0) + Number(data.frete_e_taxas || 0);
+    // Normalização rigorosa para bater com a lógica do Verify
+    const nParcela = Math.floor(parseToNumber(data.numeroParcela || data.parcelaPaga)) || 1;
+    const valorRepasse = parseToNumber(data.valor || data.repasse);
+    const comissaoTotal = parseToNumber(data.comissaoVenda) +
+      parseToNumber(data.comissaoFrete) +
+      parseToNumber(data.frete_e_taxas);
 
+    // Evita duplicidade: busca se a parcela já existe para esta venda
     const existente = await prisma.pagamento.findFirst({
       where: { vendaId: venda.id, numeroParcela: nParcela }
     });
@@ -133,41 +149,33 @@ export const pagamentoService = {
         data: {
           valor: valorRepasse,
           comissaoRetida: comissaoTotal,
-          data: data.data ? new Date(data.data) : new Date()
+          data: data.data ? new Date(data.data) : new Date(),
+          loja: data.loja || venda.loja
         }
       });
     }
 
     return await prisma.pagamento.create({
       data: {
+        vendaId: venda.id,
+        nfVenda: nfRef,
+        numeroParcela: nParcela,
         valor: valorRepasse,
         comissaoRetida: comissaoTotal,
         data: data.data ? new Date(data.data) : new Date(),
-        nfVenda: nfRef,
-        vendaId: venda.id,
-        numeroParcela: nParcela,
         loja: data.loja || venda.loja
       }
     });
   },
 
-  /**
-   * 3. IMPORTAÇÃO EM MASSA (Bulk)
-   */
   async importBulk(pagamentos: PagamentoInput[]): Promise<{ criados: number; atualizados: number }> {
     let criados = 0;
     let atualizados = 0;
 
-    const parseMoney = (val: string | number | undefined) => {
-      if (!val) return 0;
-      if (typeof val === 'number') return val;
-      return parseFloat(val.replace('.', '').replace(',', '.')) || 0;
-    };
-
     await prisma.$transaction(async (tx) => {
       for (const pgto of pagamentos) {
-        const nfRef = String(pgto.nota || pgto.nf || pgto.nfVenda).trim();
-        if (!nfRef || nfRef === "undefined") continue;
+        const nfRef = getNF(pgto);
+        if (!nfRef) continue;
 
         const venda = await tx.venda.findUnique({
           where: { nf: nfRef },
@@ -176,10 +184,13 @@ export const pagamentoService = {
 
         if (!venda) continue;
 
-        const nParcela = parseInt(String(pgto.parcelaPaga || pgto.numeroParcela || 1));
-        const valorRepasse = parseMoney(pgto.repasse || pgto.valor);
-        const comissaoTotal = parseMoney(pgto.comissaoVenda) + parseMoney(pgto.comissaoFrete) + parseMoney(pgto.frete_e_taxas);
+        const nParcela = Math.floor(parseToNumber(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
+        const valorRepasse = parseToNumber(pgto.repasse || pgto.valor);
+        const comissaoTotal = parseToNumber(pgto.comissaoVenda) +
+          parseToNumber(pgto.comissaoFrete) +
+          parseToNumber(pgto.frete_e_taxas);
 
+        // Mesma trava de segurança do Create unitário
         const existente = await tx.pagamento.findFirst({
           where: { vendaId: venda.id, numeroParcela: nParcela }
         });
