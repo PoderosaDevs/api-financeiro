@@ -180,17 +180,17 @@ export const pagamentoService = {
     });
   },
 
-  async importBulk(pagamentos: PagamentoInput[]): Promise<{ criados: number; atualizados: number; erros: any[] }> {
-    console.log(`[IMPORT] Processando ${pagamentos.length} registros.`);
+  async importBulk(pagamentos: PagamentoInput[]) {
+    console.log(`[IMPORT] Iniciando com verificador de integridade para ${pagamentos.length} registros.`);
     let [criados, atualizados] = [0, 0];
     const erros: any[] = [];
 
-    // 1. Ordenação (Parcela 1 antes da 2)
+    // 1. Ordenação (Importante para o corretor funcionar na sequência certa)
     const pgtosOrdenados = [...pagamentos].sort((a, b) =>
       Number(a.parcelaPaga || a.numeroParcela || 0) - Number(b.parcelaPaga || b.numeroParcela || 0)
     );
 
-    // 2. Busca de dados em massa para evitar gargalo
+    // 2. Busca inicial das vendas
     const nfs = [...new Set(pgtosOrdenados.map(p => p.nota).filter((n): n is string => !!n))];
     const vendasDB = await prisma.venda.findMany({
       where: { nf: { in: nfs } },
@@ -205,67 +205,71 @@ export const pagamentoService = {
 
         const venda = vendaMap.get(nfRef);
         if (!venda) {
-          console.warn(`[AVISO] NF ${nfRef} não encontrada.`);
           erros.push({ nota: nfRef, motivo: "Venda não encontrada" });
           continue;
         }
 
-        // Normalização de valores e parcelas
+        // Dados da Planilha
         const nParcela = Math.floor(Number(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
-        const totalParcelas = Math.floor(Number(pgto.numeroParcela)) || 1;
+        const totalParcelasInput = Math.floor(Number(pgto.numeroParcela)) || 1;
         const valorRepasse = Number(pgto.repasse || pgto.valor || 0);
         const comissaoTotal = Number(pgto.comissaoVenda || 0) + Number(pgto.comissaoFrete || 0) + Number(pgto.frete_e_taxas || 0);
 
-        // --- REGRA 1: Validação de Parcela Anterior ---
-        if (nParcela > 1) {
-          const anterior = venda.pagamentos.some(p => Number(p.numeroParcela) === nParcela - 1);
-          if (!anterior) {
-            console.error(`[ERRO SEQ] NF ${nfRef}: Parcela ${nParcela} sem a anterior.`);
-            erros.push({ nota: nfRef, parcela: nParcela, motivo: "Parcela anterior ausente" });
-            continue;
+        /**
+         * VERIFICADOR / CORRETOR DE INTEGRIDADE
+         * Resolve o erro de "3 parcelas de 1" deletando registros inválidos antes de processar
+         */
+
+        // A. Remove parcelas que não deveriam existir (ex: se o total agora é 1, remove as parcelas 2, 3...)
+        await tx.pagamento.deleteMany({
+          where: {
+            vendaId: venda.id,
+            numeroParcela: { gt: totalParcelasInput }
           }
+        });
+
+        // B. Verifica se há duplicados para esta mesma parcela (o erro que gerou o "3 de 1")
+        // Se houver mais de um registro para a mesma parcela, deletamos e inserimos o novo (Reset)
+        const duplicados = venda.pagamentos.filter(p => p.numeroParcela === nParcela);
+        if (duplicados.length > 0) {
+          await tx.pagamento.deleteMany({
+            where: { vendaId: venda.id, numeroParcela: nParcela }
+          });
+          // Removemos da nossa memória local também para o cálculo de status bater
+          venda.pagamentos = venda.pagamentos.filter(p => p.numeroParcela !== nParcela);
         }
 
-        // --- UPSERT (Cria ou Atualiza) ---
-        const existente = venda.pagamentos.find(p => Number(p.numeroParcela) === nParcela);
-        let pgtoSalvo;
+        // --- CRIAÇÃO DO PAGAMENTO CORRETO ---
+        const novoPagamento = await tx.pagamento.create({
+          data: {
+            vendaId: venda.id,
+            nfVenda: nfRef,
+            numeroParcela: nParcela,
+            valor: valorRepasse,
+            comissaoRetida: comissaoTotal,
+            data: pgto.data ? new Date(pgto.data) : new Date(),
+            loja: pgto.loja || venda.loja || "N/A"
+          }
+        });
+        criados++;
+        venda.pagamentos.push(novoPagamento);
 
-        if (existente) {
-          pgtoSalvo = await tx.pagamento.update({
-            where: { id: existente.id },
-            data: { valor: valorRepasse, comissaoRetida: comissaoTotal, data: pgto.data ? new Date(pgto.data) : new Date() }
-          });
-          atualizados++;
-          const idx = venda.pagamentos.findIndex(p => p.id === existente.id);
-          venda.pagamentos[idx] = pgtoSalvo;
-        } else {
-          pgtoSalvo = await tx.pagamento.create({
-            data: {
-              vendaId: venda.id,
-              nfVenda: nfRef,
-              numeroParcela: nParcela,
-              valor: valorRepasse,
-              comissaoRetida: comissaoTotal,
-              data: pgto.data ? new Date(pgto.data) : new Date(),
-              loja: pgto.loja || venda.loja || "N/A"
-            }
-          });
-          criados++;
-          venda.pagamentos.push(pgtoSalvo); // Atualiza memória para o próximo loop
-        }
+        // --- RECALCULAR STATUS DA VENDA ---
+        // Pegamos o que restou no banco (limpo) + o que acabamos de criar
+        const todosPagamentos = venda.pagamentos;
+        const totalPago = todosPagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
+        const valorEsperado = Number(venda.baseIcms || 0);
+        const numParcelasPagas = todosPagamentos.length;
 
-        // --- REGRA 2: Status da Venda e Valor Total ---
-        if (nParcela === totalParcelas) {
-          const pagoTotal = venda.pagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
-          const esperado = Number(venda.baseIcms || 0);
+        const margemCentavos = 0.50;
 
-          if (Math.abs(esperado - pagoTotal) <= 0.50) { // Margem de centavos
+        if (numParcelasPagas >= totalParcelasInput) {
+          if (Math.abs(valorEsperado - totalPago) <= margemCentavos) {
             await tx.venda.update({ where: { id: venda.id }, data: { status: 'PAGO' } });
-            console.log(`[STATUS] NF ${nfRef}: Pago Integralmente.`);
+            console.log(`[CORREÇÃO] NF ${nfRef}: Status corrigido para PAGO.`);
           } else {
             await tx.venda.update({ where: { id: venda.id }, data: { status: 'PENDENTE' } });
-            console.warn(`[STATUS] NF ${nfRef}: Divergência de valores (Esperado: ${esperado}, Pago: ${pagoTotal}).`);
-            erros.push({ nota: nfRef, motivo: "Valor final não bate" });
+            console.warn(`[CORREÇÃO] NF ${nfRef}: Valores não batem (Esperado: ${valorEsperado}, Pago: ${totalPago}).`);
           }
         } else {
           await tx.venda.update({ where: { id: venda.id }, data: { status: 'PARCIALMENTE_PAGO' } });
