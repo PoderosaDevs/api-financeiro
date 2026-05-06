@@ -19,6 +19,18 @@ interface PagamentoInput {
   loja?: string;
 }
 
+interface BulkImportResult {
+  criados: number;
+  atualizados: number;
+  erros: Array<{ nota: string; parcela: number; motivo: string }>;
+}
+
+function chunkArray<T>(array: T[], size: number): T[][] {
+  return Array.from({ length: Math.ceil(array.length / size) }, (_, i) =>
+    array.slice(i * size, i * size + size)
+  );
+}
+
 const parseToNumber = (val: string | number | undefined): number => {
   if (val === undefined || val === null || val === "") return 0;
   if (typeof val === 'number') return val;
@@ -168,45 +180,66 @@ export const pagamentoService = {
     });
   },
 
-  async importBulk(pagamentos: PagamentoInput[]): Promise<{ criados: number; atualizados: number }> {
-    let criados = 0;
-    let atualizados = 0;
+  async importBulk(pagamentos: PagamentoInput[]): Promise<{ criados: number; atualizados: number; erros: any[] }> {
+    console.log(`[IMPORT] Processando ${pagamentos.length} registros.`);
+    let [criados, atualizados] = [0, 0];
+    const erros: any[] = [];
+
+    // 1. Ordenação (Parcela 1 antes da 2)
+    const pgtosOrdenados = [...pagamentos].sort((a, b) =>
+      Number(a.parcelaPaga || a.numeroParcela || 0) - Number(b.parcelaPaga || b.numeroParcela || 0)
+    );
+
+    // 2. Busca de dados em massa para evitar gargalo
+    const nfs = [...new Set(pgtosOrdenados.map(p => p.nota).filter((n): n is string => !!n))];
+    const vendasDB = await prisma.venda.findMany({
+      where: { nf: { in: nfs } },
+      include: { pagamentos: true }
+    });
+    const vendaMap = new Map(vendasDB.map(v => [v.nf, v]));
 
     await prisma.$transaction(async (tx) => {
-      for (const pgto of pagamentos) {
-        const nfRef = getNF(pgto);
+      for (const pgto of pgtosOrdenados) {
+        const nfRef = pgto.nota;
         if (!nfRef) continue;
 
-        const venda = await tx.venda.findUnique({
-          where: { nf: nfRef },
-          select: { id: true, loja: true }
-        });
+        const venda = vendaMap.get(nfRef);
+        if (!venda) {
+          console.warn(`[AVISO] NF ${nfRef} não encontrada.`);
+          erros.push({ nota: nfRef, motivo: "Venda não encontrada" });
+          continue;
+        }
 
-        if (!venda) continue;
+        // Normalização de valores e parcelas
+        const nParcela = Math.floor(Number(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
+        const totalParcelas = Math.floor(Number(pgto.numeroParcela)) || 1;
+        const valorRepasse = Number(pgto.repasse || pgto.valor || 0);
+        const comissaoTotal = Number(pgto.comissaoVenda || 0) + Number(pgto.comissaoFrete || 0) + Number(pgto.frete_e_taxas || 0);
 
-        const nParcela = Math.floor(parseToNumber(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
-        const valorRepasse = parseToNumber(pgto.repasse || pgto.valor);
-        const comissaoTotal = parseToNumber(pgto.comissaoVenda) +
-          parseToNumber(pgto.comissaoFrete) +
-          parseToNumber(pgto.frete_e_taxas);
+        // --- REGRA 1: Validação de Parcela Anterior ---
+        if (nParcela > 1) {
+          const anterior = venda.pagamentos.some(p => Number(p.numeroParcela) === nParcela - 1);
+          if (!anterior) {
+            console.error(`[ERRO SEQ] NF ${nfRef}: Parcela ${nParcela} sem a anterior.`);
+            erros.push({ nota: nfRef, parcela: nParcela, motivo: "Parcela anterior ausente" });
+            continue;
+          }
+        }
 
-        // Mesma trava de segurança do Create unitário
-        const existente = await tx.pagamento.findFirst({
-          where: { vendaId: venda.id, numeroParcela: nParcela }
-        });
+        // --- UPSERT (Cria ou Atualiza) ---
+        const existente = venda.pagamentos.find(p => Number(p.numeroParcela) === nParcela);
+        let pgtoSalvo;
 
         if (existente) {
-          await tx.pagamento.update({
+          pgtoSalvo = await tx.pagamento.update({
             where: { id: existente.id },
-            data: {
-              valor: valorRepasse,
-              comissaoRetida: comissaoTotal,
-              data: pgto.data ? new Date(pgto.data) : new Date()
-            }
+            data: { valor: valorRepasse, comissaoRetida: comissaoTotal, data: pgto.data ? new Date(pgto.data) : new Date() }
           });
           atualizados++;
+          const idx = venda.pagamentos.findIndex(p => p.id === existente.id);
+          venda.pagamentos[idx] = pgtoSalvo;
         } else {
-          await tx.pagamento.create({
+          pgtoSalvo = await tx.pagamento.create({
             data: {
               vendaId: venda.id,
               nfVenda: nfRef,
@@ -214,15 +247,33 @@ export const pagamentoService = {
               valor: valorRepasse,
               comissaoRetida: comissaoTotal,
               data: pgto.data ? new Date(pgto.data) : new Date(),
-              loja: pgto.loja || venda.loja
+              loja: pgto.loja || venda.loja || "N/A"
             }
           });
           criados++;
+          venda.pagamentos.push(pgtoSalvo); // Atualiza memória para o próximo loop
+        }
+
+        // --- REGRA 2: Status da Venda e Valor Total ---
+        if (nParcela === totalParcelas) {
+          const pagoTotal = venda.pagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
+          const esperado = Number(venda.baseIcms || 0);
+
+          if (Math.abs(esperado - pagoTotal) <= 0.50) { // Margem de centavos
+            await tx.venda.update({ where: { id: venda.id }, data: { status: 'PAGO' } });
+            console.log(`[STATUS] NF ${nfRef}: Pago Integralmente.`);
+          } else {
+            await tx.venda.update({ where: { id: venda.id }, data: { status: 'PENDENTE' } });
+            console.warn(`[STATUS] NF ${nfRef}: Divergência de valores (Esperado: ${esperado}, Pago: ${pagoTotal}).`);
+            erros.push({ nota: nfRef, motivo: "Valor final não bate" });
+          }
+        } else {
+          await tx.venda.update({ where: { id: venda.id }, data: { status: 'PARCIALMENTE_PAGO' } });
         }
       }
     }, { timeout: 300000 });
 
-    return { criados, atualizados };
+    return { criados, atualizados, erros };
   },
 
   async getAll() {
