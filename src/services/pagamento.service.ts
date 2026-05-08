@@ -185,12 +185,10 @@ export const pagamentoService = {
     let [criados, atualizados] = [0, 0];
     const erros: any[] = [];
 
-    // 1. Ordenação (Importante para o corretor funcionar na sequência certa)
     const pgtosOrdenados = [...pagamentos].sort((a, b) =>
       Number(a.parcelaPaga || a.numeroParcela || 0) - Number(b.parcelaPaga || b.numeroParcela || 0)
     );
 
-    // 2. Busca inicial das vendas
     const nfs = [...new Set(pgtosOrdenados.map(p => p.nota).filter((n): n is string => !!n))];
     const vendasDB = await prisma.venda.findMany({
       where: { nf: { in: nfs } },
@@ -209,18 +207,11 @@ export const pagamentoService = {
           continue;
         }
 
-        // Dados da Planilha
         const nParcela = Math.floor(Number(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
         const totalParcelasInput = Math.floor(Number(pgto.numeroParcela)) || 1;
         const valorRepasse = Number(pgto.repasse || pgto.valor || 0);
         const comissaoTotal = Number(pgto.comissaoVenda || 0) + Number(pgto.comissaoFrete || 0) + Number(pgto.frete_e_taxas || 0);
 
-        /**
-         * VERIFICADOR / CORRETOR DE INTEGRIDADE
-         * Resolve o erro de "3 parcelas de 1" deletando registros inválidos antes de processar
-         */
-
-        // A. Remove parcelas que não deveriam existir (ex: se o total agora é 1, remove as parcelas 2, 3...)
         await tx.pagamento.deleteMany({
           where: {
             vendaId: venda.id,
@@ -228,18 +219,14 @@ export const pagamentoService = {
           }
         });
 
-        // B. Verifica se há duplicados para esta mesma parcela (o erro que gerou o "3 de 1")
-        // Se houver mais de um registro para a mesma parcela, deletamos e inserimos o novo (Reset)
         const duplicados = venda.pagamentos.filter(p => p.numeroParcela === nParcela);
         if (duplicados.length > 0) {
           await tx.pagamento.deleteMany({
             where: { vendaId: venda.id, numeroParcela: nParcela }
           });
-          // Removemos da nossa memória local também para o cálculo de status bater
           venda.pagamentos = venda.pagamentos.filter(p => p.numeroParcela !== nParcela);
         }
 
-        // --- CRIAÇÃO DO PAGAMENTO CORRETO ---
         const novoPagamento = await tx.pagamento.create({
           data: {
             vendaId: venda.id,
@@ -254,8 +241,6 @@ export const pagamentoService = {
         criados++;
         venda.pagamentos.push(novoPagamento);
 
-        // --- RECALCULAR STATUS DA VENDA ---
-        // Pegamos o que restou no banco (limpo) + o que acabamos de criar
         const todosPagamentos = venda.pagamentos;
         const totalPago = todosPagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
         const valorEsperado = Number(venda.baseIcms || 0);
@@ -265,14 +250,23 @@ export const pagamentoService = {
 
         if (numParcelasPagas >= totalParcelasInput) {
           if (Math.abs(valorEsperado - totalPago) <= margemCentavos) {
-            await tx.venda.update({ where: { id: venda.id }, data: { status: 'PAGO' } });
+            await tx.venda.update({
+              where: { id: venda.id },
+              data: { status: 'PAGO', quantidadeParcelas: totalParcelasInput }
+            });
             console.log(`[CORREÇÃO] NF ${nfRef}: Status corrigido para PAGO.`);
           } else {
-            await tx.venda.update({ where: { id: venda.id }, data: { status: 'PENDENTE' } });
+            await tx.venda.update({
+              where: { id: venda.id },
+              data: { status: 'PENDENTE', quantidadeParcelas: totalParcelasInput }
+            });
             console.warn(`[CORREÇÃO] NF ${nfRef}: Valores não batem (Esperado: ${valorEsperado}, Pago: ${totalPago}).`);
           }
         } else {
-          await tx.venda.update({ where: { id: venda.id }, data: { status: 'PARCIALMENTE_PAGO' } });
+          await tx.venda.update({
+            where: { id: venda.id },
+            data: { status: 'PARCIALMENTE_PAGO', quantidadeParcelas: totalParcelasInput }
+          });
         }
       }
     }, { timeout: 300000 });
