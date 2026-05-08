@@ -252,20 +252,20 @@ export const pagamentoService = {
           if (Math.abs(valorEsperado - totalPago) <= margemCentavos) {
             await tx.venda.update({
               where: { id: venda.id },
-              data: { status: 'PAGO', quantidadeParcelas: totalParcelasInput }
+              data: { status: 'PAGO', qtdParcelas: totalParcelasInput }
             });
             console.log(`[CORREÇÃO] NF ${nfRef}: Status corrigido para PAGO.`);
           } else {
             await tx.venda.update({
               where: { id: venda.id },
-              data: { status: 'PENDENTE', quantidadeParcelas: totalParcelasInput }
+              data: { status: 'PENDENTE', qtdParcelas: totalParcelasInput }
             });
             console.warn(`[CORREÇÃO] NF ${nfRef}: Valores não batem (Esperado: ${valorEsperado}, Pago: ${totalPago}).`);
           }
         } else {
           await tx.venda.update({
             where: { id: venda.id },
-            data: { status: 'PARCIALMENTE_PAGO', quantidadeParcelas: totalParcelasInput }
+            data: { status: 'PARCIALMENTE_PAGO', qtdParcelas: totalParcelasInput }
           });
         }
       }
