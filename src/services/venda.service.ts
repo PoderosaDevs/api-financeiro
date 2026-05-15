@@ -63,7 +63,6 @@ export const vendaService = {
   },
 
   // --- SUMÁRIO DE MÉTRICAS (RESOLVE O PROBLEMA DO LIMIT 50) ---
-
   async getSummary(
     dataInicio?: string,
     dataFim?: string,
@@ -72,47 +71,52 @@ export const vendaService = {
   ) {
     const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
-    const where: Prisma.VendaWhereInput = {
-      dataVenda: { gte: inicio, lte: fim },
-    };
+    const whereVendaRelacionada: Prisma.VendaWhereInput = {};
+
+    if (marketplaceId) {
+      whereVendaRelacionada.marketplaceId = marketplaceId;
+    }
 
     if (status) {
       const statusArray = status.split(",") as VendaStatus[];
-      where.status = { in: statusArray };
+      whereVendaRelacionada.status = { in: statusArray };
     }
 
-    if (marketplaceId) {
-      where.marketplaceId = marketplaceId;
-    }
+    const wherePagamento: Prisma.PagamentoWhereInput = {
+      data: { gte: inicio, lte: fim },
+      venda: whereVendaRelacionada,
+    };
 
-    const [vendasAgregadas, pagamentosAgregados, totalVendas] =
-      await Promise.all([
-        prisma.venda.aggregate({
-          where,
-          _sum: {
-            baseIcms: true,
-            comissaoVenda: true,
-            comissaoFrete: true,
-            frete_e_taxas: true,
-            liquidoReceber: true,
-          },
-        }),
-        prisma.pagamento.aggregate({
-          where: {
-            venda: where,
-          },
-          _sum: {
-            valor: true,
-          },
-        }),
-        prisma.venda.count({ where }),
-      ]);
+    const [pagamentosAgregados, vendasRelacionadas] = await Promise.all([
+      prisma.pagamento.aggregate({
+        where: wherePagamento,
+        _sum: {
+          valor: true,
+          comissaoRetida: true,
+          frete_e_taxas: true,
+        },
+      }),
+      prisma.venda.aggregate({
+        where: {
+          ...whereVendaRelacionada,
+          pagamentos: {
+            some: { data: { gte: inicio, lte: fim } }
+          }
+        },
+        _sum: {
+          baseIcms: true,
+        },
+        _count: true
+      })
+    ]);
 
-    const receitaBruta = Number(vendasAgregadas._sum.baseIcms || 0);
     const receitaRecebida = Number(pagamentosAgregados._sum.valor || 0);
+    const comissoesReais = Number(pagamentosAgregados._sum.comissaoRetida || 0);
+    const fretesPagamentos = Number(pagamentosAgregados._sum.frete_e_taxas || 0);
+    
+    const receitaBruta = receitaRecebida + comissoesReais + fretesPagamentos;
 
     const statusPendentesPermitidos: VendaStatus[] = ["PENDENTE"];
-
     let filtroStatusPendentes: VendaStatus[] = statusPendentesPermitidos;
 
     if (status) {
@@ -122,13 +126,12 @@ export const vendaService = {
       );
     }
 
-    const wherePendentes: Prisma.VendaWhereInput = {
-      ...where,
-      status: { in: filtroStatusPendentes },
-    };
-
     const vendasPendentes = await prisma.venda.aggregate({
-      where: wherePendentes,
+      where: {
+        marketplaceId,
+        status: { in: filtroStatusPendentes },
+        dataVenda: { gte: inicio, lte: fim }
+      },
       _sum: {
         baseIcms: true,
       },
@@ -136,19 +139,13 @@ export const vendaService = {
 
     const faltaReceber = Number(vendasPendentes._sum.baseIcms || 0);
 
-    const comissoesDescontadas =
-      Number(vendasAgregadas._sum.comissaoVenda || 0) +
-      Number(vendasAgregadas._sum.comissaoFrete || 0);
-
-    const fretesETarifas = Number(vendasAgregadas._sum.frete_e_taxas || 0);
-
     return {
-      vendasNoPeriodo: totalVendas,
+      vendasNoPeriodo: vendasRelacionadas._count,
       receitaBruta: Number(receitaBruta.toFixed(2)),
       faltaReceber: Number(faltaReceber.toFixed(2)),
       receitaRecebida: Number(receitaRecebida.toFixed(2)),
-      comissoesDescontadas: Number(comissoesDescontadas.toFixed(2)),
-      fretesETarifas: Number(fretesETarifas.toFixed(2)),
+      comissoesDescontadas: Number(comissoesReais.toFixed(2)),
+      fretesETarifas: Number(fretesPagamentos.toFixed(2)),
     };
   },
 
