@@ -1,4 +1,5 @@
 import { app } from './app';
+import { pagamentoService } from './services/pagamento.service';
 // import { pagamentoService } from './services/pagamento.service';
 
 const port = process.env.PORT || 3333;

@@ -19,6 +19,32 @@ interface PagamentoInput {
   loja?: string;
 }
 
+
+interface ArrayPagamentoInput {
+  // Identificação
+  nota?: string;
+  nf?: string;         // Alias comum para nota
+  nfVenda?: string;    // Alias comum para nota
+  marketplaceId?: string;
+  loja?: string;
+
+  // Valores Financeiros
+  repasse?: string | number;     // Valor líquido (seu objeto: 216.95)
+  valor?: string | number;       // Alias para repasse
+  comissaoVenda?: string | number;
+  comissaoFrete?: string | number;
+  frete_e_taxas?: string | number;
+  baseIcms?: string | number;    // Valor bruto da nota (seu objeto: 219.89)
+
+  // Controle de Parcelas
+  parcelaPaga?: string | number; // A parcela atual (ex: 1)
+  numeroParcela?: string | number; // Alias para parcelaPaga
+  parcelas?: string | number;    // Qtd total de parcelas (ex: 1)
+
+  // Temporal
+  data?: string | Date;
+}
+
 interface BulkImportResult {
   criados: number;
   atualizados: number;
@@ -180,99 +206,140 @@ export const pagamentoService = {
     });
   },
 
-  async importBulk(pagamentos: PagamentoInput[]) {
-    console.log(`[IMPORT] Iniciando com verificador de integridade para ${pagamentos.length} registros.`);
-    let [criados, atualizados] = [0, 0];
-    const erros: any[] = [];
+  async importBulk(pagamentos: ArrayPagamentoInput[]) {
+  console.log(`[IMPORT] Iniciando processamento de ${pagamentos.length} registros.`);
+  let [criados, atualizados] = [0, 0];
+  const erros: any[] = [];
 
-    const pgtosOrdenados = [...pagamentos].sort((a, b) =>
-      Number(a.parcelaPaga || a.numeroParcela || 0) - Number(b.parcelaPaga || b.numeroParcela || 0)
-    );
+  // 1. ORDENAÇÃO: Garante que a Parcela 1 venha antes para podermos validar a estrutura da Venda
+  const pgtosOrdenados = [...pagamentos].sort((a, b) => {
+    const pA = Number(a.parcelaPaga ?? a.numeroParcela ?? 0);
+    const pB = Number(b.parcelaPaga ?? b.numeroParcela ?? 0);
+    return pA - pB;
+  });
 
-    const nfs = [...new Set(pgtosOrdenados.map(p => p.nota).filter((n): n is string => !!n))];
-    const vendasDB = await prisma.venda.findMany({
-      where: { nf: { in: nfs } },
-      include: { pagamentos: true }
-    });
-    const vendaMap = new Map(vendasDB.map(v => [v.nf, v]));
+  // 2. BUSCA DE VENDAS: Coleta todas as NFs para uma única consulta ao banco
+  const nfs = [...new Set(pgtosOrdenados.map(p => p.nota || p.nf || p.nfVenda).filter((n): n is string => !!n))];
+  const vendasDB = await prisma.venda.findMany({
+    where: { nf: { in: nfs } },
+    include: { pagamentos: { orderBy: { numeroParcela: 'asc' } } }
+  });
 
-    await prisma.$transaction(async (tx) => {
-      for (const pgto of pgtosOrdenados) {
-        const nfRef = pgto.nota;
-        if (!nfRef) continue;
+  const vendaMap = new Map(vendasDB.map(v => [v.nf, v]));
 
-        const venda = vendaMap.get(nfRef);
-        if (!venda) {
-          erros.push({ nota: nfRef, motivo: "Venda não encontrada" });
+  // 3. TRANSAÇÃO: Garante integridade dos dados
+  await prisma.$transaction(async (tx) => {
+    for (const pgto of pgtosOrdenados) {
+      const nfRef = pgto.nota || pgto.nf || pgto.nfVenda;
+      if (!nfRef) continue;
+
+      const venda = vendaMap.get(nfRef);
+      if (!venda) {
+        erros.push({ nota: nfRef, motivo: "Venda não cadastrada no sistema." });
+        continue;
+      }
+
+      // --- MAPEAMENTO DE DADOS (Converte string/number para Number puro) ---
+      const nParcelaAtual = Math.floor(Number(pgto.parcelaPaga ?? pgto.numeroParcela)) || 1;
+      const totalParcelasInput = Math.floor(Number(pgto.parcelas ?? venda.qtdParcelas)) || 1;
+      const valorRepasse = Number(pgto.repasse ?? pgto.valor ?? 0);
+      const taxas = Number(pgto.comissaoVenda ?? 0) + Number(pgto.comissaoFrete ?? 0) + Number(pgto.frete_e_taxas ?? 0);
+      const valorBrutoDestaParcela = valorRepasse + taxas;
+
+      // --- REGRA: ATUALIZAR QTD_PARCELAS DA VENDA SOMENTE NA PARCELA 1 ---
+      if (nParcelaAtual === 1 && totalParcelasInput !== venda.qtdParcelas) {
+        await tx.venda.update({
+          where: { id: venda.id },
+          data: { qtdParcelas: totalParcelasInput }
+        });
+        venda.qtdParcelas = totalParcelasInput; // Atualiza em memória para as próximas verificações do loop
+      }
+
+      // --- REGRA: NÃO PERMITIR PARCELA MAIOR QUE O TOTAL DA VENDA ---
+      if (nParcelaAtual > (venda.qtdParcelas || 0)) {
+        erros.push({ nota: nfRef, parcela: nParcelaAtual, motivo: `Venda configurada para ${venda.qtdParcelas}x, mas recebida parcela ${nParcelaAtual}.` });
+        continue;
+      }
+
+      // --- REGRA: FLUXO SEQUENCIAL (Não pode pular parcelas) ---
+      if (nParcelaAtual > 1) {
+        const anteriorExiste = venda.pagamentos.some(p => p.numeroParcela === nParcelaAtual - 1);
+        if (!anteriorExiste) {
+          erros.push({ nota: nfRef, parcela: nParcelaAtual, motivo: `Pagamento da parcela ${nParcelaAtual - 1} não encontrado. O fluxo deve ser sequencial.` });
           continue;
         }
+      }
 
-        const nParcela = Math.floor(Number(pgto.parcelaPaga || pgto.numeroParcela)) || 1;
-        const totalParcelasInput = Math.floor(Number(pgto.numeroParcela)) || 1;
-        const valorRepasse = Number(pgto.repasse || pgto.valor || 0);
-        const comissaoTotal = Number(pgto.comissaoVenda || 0) + Number(pgto.comissaoFrete || 0) + Number(pgto.frete_e_taxas || 0);
+      // --- REGRA: CRUZAMENTO DE VALORES (CONSISTÊNCIA FINANCEIRA) ---
+      // Verificamos se o Bruto (Repasse + Comissões) bate com a divisão da BaseIcms
+      const valorEsperadoBruto = Number(venda.baseIcms) / (venda.qtdParcelas || 1);
+      if (Math.abs(valorBrutoDestaParcela - valorEsperadoBruto) > 1.0) { // Margem de R$ 1,00
+        erros.push({ 
+          nota: nfRef, 
+          parcela: nParcelaAtual, 
+          motivo: `Valor inconsistente. Esperado Bruto: ${valorEsperadoBruto.toFixed(2)}, Recebido: ${valorBrutoDestaParcela.toFixed(2)}` 
+        });
+        continue;
+      }
 
-        await tx.pagamento.deleteMany({
-          where: {
-            vendaId: venda.id,
-            numeroParcela: { gt: totalParcelasInput }
+      // --- REGRA: VERIFICAÇÃO E ATUALIZAÇÃO (UPSERT MANUAL) ---
+      const pagamentoExistente = venda.pagamentos.find(p => p.numeroParcela === nParcelaAtual);
+
+      if (pagamentoExistente) {
+        // Se já existe, apenas ATUALIZAMOS os campos, nunca criamos duplicados (respeitando o @@unique)
+        const pgtoAtualizado = await tx.pagamento.update({
+          where: { id: pagamentoExistente.id },
+          data: {
+            valor: valorRepasse,
+            comissaoRetida: taxas,
+            data: pgto.data ? new Date(pgto.data) : new Date(),
+            loja: pgto.loja || venda.loja
           }
         });
-
-        const duplicados = venda.pagamentos.filter(p => p.numeroParcela === nParcela);
-        if (duplicados.length > 0) {
-          await tx.pagamento.deleteMany({
-            where: { vendaId: venda.id, numeroParcela: nParcela }
-          });
-          venda.pagamentos = venda.pagamentos.filter(p => p.numeroParcela !== nParcela);
-        }
-
-        const novoPagamento = await tx.pagamento.create({
+        // Atualiza a memória para o recálculo do status abaixo
+        venda.pagamentos = venda.pagamentos.map(p => p.id === pgtoAtualizado.id ? pgtoAtualizado : p);
+        atualizados++;
+      } else {
+        // Se não existe, criamos o novo registro
+        const novoPgto = await tx.pagamento.create({
           data: {
             vendaId: venda.id,
             nfVenda: nfRef,
-            numeroParcela: nParcela,
+            numeroParcela: nParcelaAtual,
             valor: valorRepasse,
-            comissaoRetida: comissaoTotal,
+            comissaoRetida: taxas,
             data: pgto.data ? new Date(pgto.data) : new Date(),
-            loja: pgto.loja || venda.loja || "N/A"
+            loja: pgto.loja || venda.loja
           }
         });
+        venda.pagamentos.push(novoPgto);
         criados++;
-        venda.pagamentos.push(novoPagamento);
+      }
 
-        const todosPagamentos = venda.pagamentos;
-        const totalPago = todosPagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
-        const valorEsperado = Number(venda.baseIcms || 0);
-        const numParcelasPagas = todosPagamentos.length;
+      // --- RECALCULO DE STATUS DA VENDA ---
+      const totalBrutoRecebido = venda.pagamentos.reduce((acc, p) => acc + Number(p.valor) + Number(p.comissaoRetida), 0);
+      const totalBaseVenda = Number(venda.baseIcms);
+      const totalParcelasPagas = venda.pagamentos.length;
+      
+      let novoStatus: any = 'PARCIALMENTE_PAGO';
 
-        const margemCentavos = 0.50;
-
-        if (numParcelasPagas >= totalParcelasInput) {
-          if (Math.abs(valorEsperado - totalPago) <= margemCentavos) {
-            await tx.venda.update({
-              where: { id: venda.id },
-              data: { status: 'PAGO', qtdParcelas: totalParcelasInput }
-            });
-            console.log(`[CORREÇÃO] NF ${nfRef}: Status corrigido para PAGO.`);
-          } else {
-            await tx.venda.update({
-              where: { id: venda.id },
-              data: { status: 'PENDENTE', qtdParcelas: totalParcelasInput }
-            });
-            console.warn(`[CORREÇÃO] NF ${nfRef}: Valores não batem (Esperado: ${valorEsperado}, Pago: ${totalPago}).`);
-          }
-        } else {
-          await tx.venda.update({
-            where: { id: venda.id },
-            data: { status: 'PARCIALMENTE_PAGO', qtdParcelas: totalParcelasInput }
-          });
+      // Se pagou todas as parcelas E o valor bate com a BaseIcms (margem de 50 centavos)
+      if (totalParcelasPagas >= (venda.qtdParcelas || 0)) {
+        const diferencaFinal = Math.abs(totalBaseVenda - totalBrutoRecebido);
+        if (diferencaFinal <= 0.50) {
+          novoStatus = 'PAGO';
         }
       }
-    }, { timeout: 300000 });
 
-    return { criados, atualizados, erros };
-  },
+      await tx.venda.update({
+        where: { id: venda.id },
+        data: { status: novoStatus }
+      });
+    }
+  }, { timeout: 600000 });
+
+  return { criados, atualizados, erros };
+},
 
   async getAll() {
     return await prisma.pagamento.findMany({
