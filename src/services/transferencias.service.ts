@@ -119,56 +119,59 @@ export const transferenciaService = {
 
     let processados = 0;
     const falhasNf: string[] = [];
-    const updatesVendas: any[] = [];
-    const novasDevolucoes: any[] = [];
 
-    for (const dev of devolucoes) {
-      const nfRef = String(dev.nf || dev.nfVenda).trim();
-      const venda = vendasMap.get(nfRef);
+    // --- TRANSAÇÃO INTERATIVA COM TEMPO EXPANDIDO (SEGUINDO O SEU PADRÃO) ---
+    await prisma.$transaction(async (tx) => {
+      for (const dev of devolucoes) {
+        const nfRef = String(dev.nf || dev.nfVenda).trim();
+        const venda = vendasMap.get(nfRef);
 
-      if (!venda) {
-        falhasNf.push(nfRef);
-        continue;
-      }
+        if (!venda) {
+          falhasNf.push(nfRef);
+          continue;
+        }
 
-      const tratativa = String(dev.tratativa || "").toUpperCase();
-      const novoStatus =
-        tratativa.includes("TOTAL") || tratativa === "DEVOLUCAO TOTAL"
-          ? VendaStatus.DEVOLVIDO
-          : VendaStatus.PARCIALMENTE_DEVOLVIDO;
+        const tratativa = String(dev.tratativa || "").toUpperCase();
+        const novoStatus =
+          tratativa.includes("TOTAL") || tratativa === "DEVOLUCAO TOTAL"
+            ? VendaStatus.DEVOLVIDO
+            : VendaStatus.PARCIALMENTE_DEVOLVIDO;
 
-      updatesVendas.push(
-        prisma.venda.update({
+        // Executa o update de forma sequencial e controlada dentro do contexto 'tx'
+        await tx.venda.update({
           where: { id: venda.id },
           data: { status: novoStatus },
-        })
-      );
+        });
 
-      novasDevolucoes.push({
-        vendaId: venda.id,
-        nfVenda: nfRef,
-        data: new Date(dev.data || new Date()),
-        valorBase: parseFloat(String(dev.valorBase || dev.base || 0)),
-        numeroDevolucao: String(dev.numeroDevolucao || dev.devolucao || Date.now().toString()),
-        valor: parseFloat(String(dev.valor || 0)),
-        saldo: parseFloat(String(dev.saldo || 0)),
-        tratativa: tratativa,
-        motivo: String(dev.motivo || ""),
-        loja: String(dev.loja || ""),
-      });
+        // Monta o identificador único para o numeroDevolucao caso venha vazio
+        const numeroDevRef = String(
+          dev.numeroDevolucao ||
+          dev.devolucao ||
+          `DEV-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`
+        );
 
-      processados++;
-    }
-
-    if (novasDevolucoes.length > 0) {
-      await prisma.$transaction([
-        ...updatesVendas,
-        prisma.devolucao.createMany({
-          data: novasDevolucoes,
+        // Cria a devolução utilizando o createMany com skipDuplicates dentro do escopo seguro
+        await tx.devolucao.createMany({
+          data: [{
+            vendaId: venda.id,
+            nfVenda: nfRef,
+            data: dev.data ? new Date(dev.data) : new Date(),
+            valorBase: parseFloat(String(dev.valorBase || dev.base || 0)),
+            numeroDevolucao: numeroDevRef,
+            valor: parseFloat(String(dev.valor || 0)),
+            saldo: parseFloat(String(dev.saldo || 0)),
+            tratativa: tratativa,
+            motivo: String(dev.motivo || ""),
+            loja: String(dev.loja || ""),
+          }],
           skipDuplicates: true,
-        }),
-      ]);
-    }
+        });
+
+        processados++;
+      }
+    }, {
+      timeout: 600000 // Timeout estendido para 10 minutos, idêntico ao seu importBulk
+    });
 
     return { count: processados, skipped: falhasNf };
   },
@@ -192,10 +195,10 @@ export const transferenciaService = {
       throw new Error(`A parcela ${payload.parcelaPaga} já possui um reembolso registrado para esta NF.`);
     }
 
-    return { 
-      message: "Reembolso criado com sucesso", 
+    return {
+      message: "Reembolso criado com sucesso",
       vendaId: data.vendaId,
-      ...res 
+      ...res
     };
   },
 
@@ -215,10 +218,10 @@ export const transferenciaService = {
       throw new Error(`Venda com NF ${data.nf} não encontrada.`);
     }
 
-    return { 
-      message: "Devolução criada com sucesso", 
+    return {
+      message: "Devolução criada com sucesso",
       vendaId: data.vendaId,
-      ...res 
+      ...res
     };
   },
 

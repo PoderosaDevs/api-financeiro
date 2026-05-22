@@ -71,53 +71,68 @@ export const vendaService = {
   ) {
     const { inicio, fim } = getIntervaloDatas(dataInicio, dataFim);
 
-    const whereVendaRelacionada: Prisma.VendaWhereInput = {};
+    // 1. O Filtro principal de recorte baseia-se unicamente na data da VENDA
+    const whereVenda: Prisma.VendaWhereInput = {
+      dataVenda: { gte: inicio, lte: fim }
+    };
 
     if (marketplaceId) {
-      whereVendaRelacionada.marketplaceId = marketplaceId;
+      whereVenda.marketplaceId = marketplaceId;
     }
 
     if (status) {
       const statusArray = status.split(",") as VendaStatus[];
-      whereVendaRelacionada.status = { in: statusArray };
+      whereVenda.status = { in: statusArray };
     }
 
-    const wherePagamento: Prisma.PagamentoWhereInput = {
-      data: { gte: inicio, lte: fim },
-      venda: whereVendaRelacionada,
-    };
+    // 2. Buscamos todas as vendas do período para extrair os IDs e somar fretes/taxas
+    const vendasNoPeriodo = await prisma.venda.findMany({
+      where: whereVenda,
+      select: {
+        id: true,
+        baseIcms: true,
+        frete_e_taxas: true,
+        status: true
+      }
+    });
 
-    const [pagamentosAgregados, vendasRelacionadas] = await Promise.all([
-      prisma.pagamento.aggregate({
-        where: wherePagamento,
-        _sum: {
-          valor: true,
-          comissaoRetida: true,
-          frete_e_taxas: true,
-        },
-      }),
-      prisma.venda.aggregate({
-        where: {
-          ...whereVendaRelacionada,
-          pagamentos: {
-            some: { data: { gte: inicio, lte: fim } }
-          }
-        },
-        _sum: {
-          baseIcms: true,
-        },
-        _count: true
-      })
-    ]);
+    const totalVendas = vendasNoPeriodo.length;
 
-    const receitaRecebida = Number(pagamentosAgregados._sum.valor || 0);
-    const comissoesReais = Number(pagamentosAgregados._sum.comissaoRetida || 0);
-    const fretesPagamentos = Number(pagamentosAgregados._sum.frete_e_taxas || 0);
-    
-    const receitaBruta = receitaRecebida + comissoesReais + fretesPagamentos;
+    // Se não houver vendas no período, já mata a execução retornando tudo zerado
+    if (totalVendas === 0) {
+      return {
+        vendasNoPeriodo: 0,
+        receitaBruta: 0,
+        faltaReceber: 0,
+        receitaRecebida: 0,
+        comissoesDescontadas: 0,
+        fretesETarifas: 0,
+      };
+    }
 
+    // Criamos a lista de IDs das vendas criadas exclusivamente nesse período
+    const listVendaIds = vendasNoPeriodo.map(v => v.id);
+
+    // 3. Agregamos os pagamentos associados DIRETAMENTE pelo ID da Venda (Evita bugs do indexador do Prisma)
+    const pagamentosAgregados = await prisma.pagamento.aggregate({
+      where: {
+        vendaId: { in: listVendaIds } // Agarra todas as parcelas/pagamentos dessas vendas independente de quando foram pagos
+      },
+      _sum: {
+        valor: true,
+        comissaoRetida: true,
+      },
+    });
+
+    // Somatórias diretas dos decimais vindos das vendas mapeadas
+    const fretesETarifas = vendasNoPeriodo.reduce((sum, v) => sum + Number(v.frete_e_taxas || 0), 0);
+
+    // [ALTERAÇÃO] Cálculo da receita bruta como a soma do campo baseIcms de todas as vendas recortadas no período
+    const receitaBruta = vendasNoPeriodo.reduce((sum, v) => sum + Number(v.baseIcms || 0), 0);
+
+    // 4. Lógica do Falta Receber (Apenas vendas PENDENTES criadas neste período)
     const statusPendentesPermitidos: VendaStatus[] = ["PENDENTE"];
-    let filtroStatusPendentes: VendaStatus[] = statusPendentesPermitidos;
+    let filtroStatusPendentes = statusPendentesPermitidos;
 
     if (status) {
       const statusSolicitados = status.split(",") as VendaStatus[];
@@ -126,26 +141,20 @@ export const vendaService = {
       );
     }
 
-    const vendasPendentes = await prisma.venda.aggregate({
-      where: {
-        marketplaceId,
-        status: { in: filtroStatusPendentes },
-        dataVenda: { gte: inicio, lte: fim }
-      },
-      _sum: {
-        baseIcms: true,
-      },
-    });
+    const faltaReceber = vendasNoPeriodo
+      .filter(v => filtroStatusPendentes.includes(v.status))
+      .reduce((sum, v) => sum + Number(v.baseIcms || 0), 0);
 
-    const faltaReceber = Number(vendasPendentes._sum.baseIcms || 0);
+    const receitaRecebida = Number(pagamentosAgregados._sum?.valor || 0);
+    const comissoesReais = Number(pagamentosAgregados._sum?.comissaoRetida || 0);
 
     return {
-      vendasNoPeriodo: vendasRelacionadas._count,
+      vendasNoPeriodo: totalVendas,
       receitaBruta: Number(receitaBruta.toFixed(2)),
       faltaReceber: Number(faltaReceber.toFixed(2)),
       receitaRecebida: Number(receitaRecebida.toFixed(2)),
       comissoesDescontadas: Number(comissoesReais.toFixed(2)),
-      fretesETarifas: Number(fretesPagamentos.toFixed(2)),
+      fretesETarifas: Number(fretesETarifas.toFixed(2)),
     };
   },
 

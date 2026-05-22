@@ -7,6 +7,7 @@ import { marketplaceRoutes } from './routes/marketplace.route'
 import { vendaRoutes } from './routes/venda.route'
 import { pagamentoRoutes } from './routes/pagamento.route'
 import { transferenciaRoutes } from './routes/transferencia.route'
+import { dashboardRoutes } from './routes/dashboard.route'
 
 const app = express()
 
@@ -18,7 +19,9 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Registro das Rotas da Aplicação
-app.use('/auth', authRoutes)       
+app.use('/auth', authRoutes) 
+app.use('/dashboard', dashboardRoutes)       
+
 app.use('/users', userRoutes)       
 app.use('/marketplaces', marketplaceRoutes) 
 app.use('/vendas', vendaRoutes)    
